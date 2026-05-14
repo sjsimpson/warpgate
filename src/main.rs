@@ -61,6 +61,8 @@ fn handle_normal(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('k') | KeyCode::Up => app.move_up(),
         KeyCode::Char('h') | KeyCode::Left => app.prev_pane(),
         KeyCode::Char('l') | KeyCode::Right => app.next_pane(),
+        KeyCode::Char('1') => app.active_pane = app::Pane::Tasks,
+        KeyCode::Char('2') => app.active_pane = app::Pane::Projects,
         KeyCode::Char('d') => app.request_done(),
         KeyCode::Char('x') => app.request_delete(),
         KeyCode::Char('s') => app.toggle_start_selected(),

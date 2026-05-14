@@ -3,7 +3,9 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap,
+    },
 };
 
 use crate::app::{App, InputMode, Pane};
@@ -17,8 +19,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             .areas(main_area);
 
     let [tasks_area, projects_area] =
-        Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .areas(left_area);
+        Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(left_area);
 
     draw_tasks(f, app, tasks_area);
     draw_projects(f, app, projects_area);
@@ -101,15 +102,27 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let title = match app.selected_project_name() {
-        Some(p) => format!(" Tasks [{}] ", p),
-        None => " Tasks [all] ".to_string(),
+    let pane_num_style = if app.active_pane == Pane::Tasks {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
     };
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(title)
+        .title(Line::from(vec![
+            Span::styled(" [1] ", pane_num_style),
+            Span::styled(
+                "Tasks ",
+                if app.active_pane == Pane::Tasks {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+        ]))
         .border_style(Style::default().fg(pane_border_color(app, Pane::Tasks)));
 
     let table = Table::new(
@@ -149,10 +162,27 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let pane_num_style = if app.active_pane == Pane::Projects {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(" Projects ")
+        .title(Line::from(vec![
+            Span::styled(" [2] ", pane_num_style),
+            Span::styled(
+                "Projects ",
+                if app.active_pane == Pane::Projects {
+                    Style::default().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                },
+            ),
+        ]))
         .border_style(Style::default().fg(pane_border_color(app, Pane::Projects)));
 
     let list = List::new(items).block(block);
@@ -315,8 +345,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let help =
-        " ?:help  a:add  m:modify  n/N:note  d:done  x:del  s:start  D:dup  u:undo ";
+    let help = " ?:help  a:add  m:modify  n/N:note  d:done  x:del  s:start  D:dup  u:undo ";
     let status_line = if app.status_msg.is_empty() {
         Line::from(vec![Span::styled(
             help,
@@ -337,27 +366,41 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
 // --- Overlays ---
 
 fn draw_confirm(f: &mut Frame, app: &App) {
-    let max_option_len = app.confirm_options.iter()
+    let max_option_len = app
+        .confirm_options
+        .iter()
         .map(|o| o.label.len() + 6) // " k  Label "
         .max()
         .unwrap_or(10) as u16;
-    let width = (app.confirm_msg.len() as u16 + 4).max(max_option_len + 4).max(30);
+    let width = (app.confirm_msg.len() as u16 + 4)
+        .max(max_option_len + 4)
+        .max(30);
     let height = app.confirm_options.len() as u16 + 4; // msg + blank + options + borders
     let area = centered_rect_abs(width, height, f.area());
 
     f.render_widget(Clear, area);
 
-    let sel_style = Style::default().fg(Color::Black).bg(Color::White).add_modifier(Modifier::BOLD);
+    let sel_style = Style::default()
+        .fg(Color::Black)
+        .bg(Color::White)
+        .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
     let key_style = Style::default().fg(Color::Yellow);
 
     let mut lines = vec![
-        Line::from(Span::styled(&app.confirm_msg, Style::default().fg(Color::White))),
+        Line::from(Span::styled(
+            &app.confirm_msg,
+            Style::default().fg(Color::White),
+        )),
         Line::from(""),
     ];
 
     for (i, opt) in app.confirm_options.iter().enumerate() {
-        let label_style = if i == app.confirm_selected { sel_style } else { dim };
+        let label_style = if i == app.confirm_selected {
+            sel_style
+        } else {
+            dim
+        };
         lines.push(Line::from(vec![
             Span::styled(format!(" {} ", opt.key), key_style),
             Span::styled(format!(" {} ", opt.label), label_style),
@@ -403,14 +446,25 @@ fn draw_task_form(f: &mut Frame, app: &App) {
             Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .areas(area);
 
-        let form_border = if form.docs_focused { Color::DarkGray } else { Color::Yellow };
-        let docs_border = if form.docs_focused { Color::Cyan } else { Color::DarkGray };
+        let form_border = if form.docs_focused {
+            Color::DarkGray
+        } else {
+            Color::Yellow
+        };
+        let docs_border = if form.docs_focused {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
 
         // Form pane
         let form_title = if form.docs_focused {
             format!("{}", title.trim())
         } else {
-            format!("{} (Up/Down:fields  Tab:docs  Enter:submit  Esc:cancel)", title.trim())
+            format!(
+                "{} (Up/Down:fields  Tab:docs  Enter:submit  Esc:cancel)",
+                title.trim()
+            )
         };
         let form_lines = build_form_lines(form, &fields);
         let form_widget = Paragraph::new(form_lines)
@@ -426,7 +480,10 @@ fn draw_task_form(f: &mut Frame, app: &App) {
 
         // Docs pane
         let docs_title = if form.docs_focused {
-            format!(" {} (j/k:scroll  Tab:back  Esc:back) ", form.active_field.label())
+            format!(
+                " {} (j/k:scroll  Tab:back  Esc:back) ",
+                form.active_field.label()
+            )
         } else {
             format!(" {} ", form.active_field.label())
         };
@@ -568,11 +625,7 @@ fn draw_denotate(f: &mut Frame, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, ann)| {
-            let date = ann
-                .entry
-                .as_deref()
-                .map(format_date)
-                .unwrap_or_default();
+            let date = ann.entry.as_deref().map(format_date).unwrap_or_default();
             let desc = ann.description.as_deref().unwrap_or("");
             let text = format!("  {} {}", date, desc);
             let style = if i == app.selected_annotation {
@@ -599,33 +652,48 @@ fn draw_denotate(f: &mut Frame, app: &App) {
 }
 
 fn draw_help(f: &mut Frame) {
-    let section_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+    let section_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
     let desc_style = Style::default().fg(Color::White);
 
     let groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
-        ("Navigation", vec![
-            ("j / k / Up / Down", "Navigate items"),
-            ("h / l / Left / Right", "Switch pane"),
-        ]),
-        ("Tasks", vec![
-            ("a", "Add new task"),
-            ("m", "Modify selected task"),
-            ("d", "Mark task done"),
-            ("x", "Delete task"),
-            ("s", "Start / stop task"),
-            ("D", "Duplicate task"),
-        ]),
-        ("Annotations", vec![
-            ("n", "Add annotation"),
-            ("N", "Remove annotation"),
-        ]),
-        ("General", vec![
-            ("u", "Undo last action"),
-            ("r", "Refresh from taskwarrior"),
-            ("?", "Toggle this help"),
-            ("q / Ctrl+C", "Quit"),
-        ]),
+        (
+            "Navigation",
+            vec![
+                ("j / DownArrow", "Next item"),
+                ("k / UpArrow", "Prev item"),
+                ("l / RightArrow", "Next pane"),
+                ("h / LeftArrow", "Prev pane"),
+            ],
+        ),
+        (
+            "Tasks",
+            vec![
+                ("a", "Add new task"),
+                ("m", "Modify selected task"),
+                ("d", "Mark task done"),
+                ("x", "Delete task"),
+                ("s", "Start / stop task"),
+                ("D", "Duplicate task"),
+            ],
+        ),
+        (
+            "Annotations",
+            vec![("n", "Add annotation"), ("N", "Remove annotation")],
+        ),
+        (
+            "General",
+            vec![
+                ("u", "Undo last action"),
+                ("r", "Refresh from taskwarrior"),
+                ("?", "Toggle this help"),
+                ("q / Ctrl+C", "Quit"),
+            ],
+        ),
     ];
 
     let mut lines: Vec<Line> = vec![Line::from("")];
