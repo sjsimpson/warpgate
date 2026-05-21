@@ -1,3 +1,4 @@
+use chrono::{NaiveDate, Utc};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -46,11 +47,11 @@ impl Task {
     pub fn age(&self) -> String {
         match &self.entry {
             Some(d) if d.len() >= 8 => {
-                let now = chrono::Utc::now();
+                let now = Utc::now();
                 let year: i32 = d[0..4].parse().unwrap_or(0);
                 let month: u32 = d[4..6].parse().unwrap_or(1);
                 let day: u32 = d[6..8].parse().unwrap_or(1);
-                if let Some(created) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+                if let Some(created) = NaiveDate::from_ymd_opt(year, month, day) {
                     let days = (now.date_naive() - created).num_days();
                     if days == 0 {
                         "today".into()

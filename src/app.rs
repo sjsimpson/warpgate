@@ -1,3 +1,4 @@
+use chrono::Utc;
 use color_eyre::Result;
 
 use crate::task::Task;
@@ -15,6 +16,15 @@ fn format_tw_date(raw: &Option<String>) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectSummary {
+    pub name: String,
+    pub remaining: usize,
+    pub completed: usize,
+    pub total: usize,
+    pub avg_age_days: f64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Pane {
     Tasks,
@@ -30,6 +40,66 @@ pub enum InputMode {
     TaskForm,
     Annotate,
     Denotate,
+    Filter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Report {
+    Pending,
+    All,
+    Completed,
+    Overdue,
+    Active,
+}
+
+pub const ALL_REPORTS: &[Report] = &[
+    Report::Pending,
+    Report::All,
+    Report::Completed,
+    Report::Overdue,
+    Report::Active,
+];
+
+impl Report {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::All => "all",
+            Self::Completed => "completed",
+            Self::Overdue => "overdue",
+            Self::Active => "active",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Pending => Self::All,
+            Self::All => Self::Completed,
+            Self::Completed => Self::Overdue,
+            Self::Overdue => Self::Active,
+            Self::Active => Self::Pending,
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Pending => Self::Active,
+            Self::All => Self::Pending,
+            Self::Completed => Self::All,
+            Self::Overdue => Self::Completed,
+            Self::Active => Self::Overdue,
+        }
+    }
+
+    pub fn filter_args(self) -> Vec<&'static str> {
+        match self {
+            Self::Pending => vec!["status:pending"],
+            Self::All => vec![],
+            Self::Completed => vec!["status:completed"],
+            Self::Overdue => vec!["+OVERDUE"],
+            Self::Active => vec!["+ACTIVE"],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,7 +163,7 @@ impl FormField {
     /// Returns a section header to display before this field, if it starts a new group
     pub fn section_header(self) -> Option<&'static str> {
         match self {
-            Self::Description => Some("Basic"),
+            Self::Description => Some("Info"),
             Self::Recur => Some("Recurrence"),
             Self::Wait => Some("Scheduling"),
             Self::Depends => Some("Dependencies"),
@@ -340,7 +410,6 @@ pub struct TaskForm {
     pub depends: String,
     pub active_field: FormField,
     pub editing_uuid: Option<String>,
-    pub is_advanced: bool,
     pub docs_focused: bool,
     pub docs_scroll: u16,
 }
@@ -360,7 +429,6 @@ impl TaskForm {
             depends: String::new(),
             active_field: FormField::Description,
             editing_uuid: None,
-            is_advanced: true,
             docs_focused: false,
             docs_scroll: 0,
         }
@@ -380,7 +448,6 @@ impl TaskForm {
             depends: task.depends.clone().unwrap_or_default(),
             active_field: FormField::Description,
             editing_uuid: task.uuid.clone(),
-            is_advanced: true,
             docs_focused: false,
             docs_scroll: 0,
         }
@@ -392,14 +459,20 @@ impl TaskForm {
 
     pub fn next_field(&mut self) {
         let fields = self.field_list();
-        let idx = fields.iter().position(|f| *f == self.active_field).unwrap_or(0);
+        let idx = fields
+            .iter()
+            .position(|f| *f == self.active_field)
+            .unwrap_or(0);
         self.active_field = fields[(idx + 1) % fields.len()];
         self.docs_scroll = 0;
     }
 
     pub fn prev_field(&mut self) {
         let fields = self.field_list();
-        let idx = fields.iter().position(|f| *f == self.active_field).unwrap_or(0);
+        let idx = fields
+            .iter()
+            .position(|f| *f == self.active_field)
+            .unwrap_or(0);
         self.active_field = fields[(idx + fields.len() - 1) % fields.len()];
         self.docs_scroll = 0;
     }
@@ -454,6 +527,9 @@ pub struct App {
     pub confirm_selected: usize,
     pub task_form: Option<TaskForm>,
     pub selected_annotation: usize,
+    pub active_report: Report,
+    pub filter_text: String,
+    pub project_summaries: Vec<ProjectSummary>,
 }
 
 impl App {
@@ -461,7 +537,7 @@ impl App {
         let tasks = taskwarrior::get_pending_tasks().unwrap_or_default();
         let projects = taskwarrior::get_projects(&tasks);
 
-        Ok(App {
+        let mut app = App {
             tasks,
             projects,
             selected_project: 0,
@@ -476,13 +552,34 @@ impl App {
             confirm_selected: 0,
             task_form: None,
             selected_annotation: 0,
-        })
+            active_report: Report::Pending,
+            filter_text: String::new(),
+            project_summaries: Vec::new(),
+        };
+        app.update_project_summaries();
+        Ok(app)
+    }
+
+    pub fn load_tasks(&self) -> Vec<Task> {
+        let mut args: Vec<&str> = self.active_report.filter_args();
+        let filter_words: Vec<String>;
+        if !self.filter_text.is_empty() {
+            filter_words = self
+                .filter_text
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            for w in &filter_words {
+                args.push(w.as_str());
+            }
+        }
+        taskwarrior::get_tasks_with_filter(&args).unwrap_or_default()
     }
 
     pub fn refresh(&mut self) {
         let prev_project = self.selected_project_name().map(|s| s.to_string());
 
-        self.tasks = taskwarrior::get_pending_tasks().unwrap_or_default();
+        self.tasks = self.load_tasks();
         self.projects = taskwarrior::get_projects(&self.tasks);
 
         // If the selected project no longer exists, fall back to (all)
@@ -501,6 +598,112 @@ impl App {
         } else if self.selected_task >= filtered_len {
             self.selected_task = filtered_len - 1;
         }
+
+        self.update_project_summaries();
+    }
+
+    fn update_project_summaries(&mut self) {
+        // Get all tasks (pending + completed) for accurate stats
+        let all_tasks = taskwarrior::get_tasks_with_filter(&[]).unwrap_or_default();
+        let now = Utc::now().date_naive();
+
+        let mut project_map: std::collections::BTreeMap<String, (usize, usize, Vec<i64>)> =
+            std::collections::BTreeMap::new();
+
+        for task in &all_tasks {
+            let proj = task.project.clone().unwrap_or("(none)".to_string());
+            let entry = project_map.entry(proj).or_insert((0, 0, Vec::new()));
+
+            if task.status.as_deref() == Some("completed") {
+                entry.1 += 1; // completed
+            } else if task.status.as_deref() == Some("pending") {
+                entry.0 += 1; // remaining
+
+                // Calculate age in days
+                if let Some(ref e) = task.entry {
+                    if e.len() >= 8 {
+                        let year: i32 = e[0..4].parse().unwrap_or(0);
+                        let month: u32 = e[4..6].parse().unwrap_or(1);
+                        let day: u32 = e[6..8].parse().unwrap_or(1);
+                        if let Some(created) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+                            entry.2.push((now - created).num_days());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Ensure parent projects exist for any dotted child
+        let child_keys: Vec<String> = project_map.keys().cloned().collect();
+        for key in &child_keys {
+            let mut parts: Vec<&str> = key.split('.').collect();
+            while parts.len() > 1 {
+                parts.pop();
+                let parent = parts.join(".");
+                project_map.entry(parent).or_insert((0, 0, Vec::new()));
+            }
+        }
+
+        // Build leaf summaries first
+        let leaf_summaries: std::collections::BTreeMap<String, (usize, usize, Vec<i64>)> =
+            project_map;
+
+        // Aggregate children into parents
+        let all_keys: Vec<String> = leaf_summaries.keys().cloned().collect();
+        let mut aggregated: std::collections::BTreeMap<String, (usize, usize, Vec<i64>)> =
+            std::collections::BTreeMap::new();
+
+        for key in &all_keys {
+            let (remaining, completed, ref ages) = leaf_summaries[key];
+            // Add to self
+            let entry = aggregated.entry(key.clone()).or_insert((0, 0, Vec::new()));
+            entry.0 += remaining;
+            entry.1 += completed;
+            entry.2.extend(ages.iter());
+
+            // Add to all ancestors
+            let mut parts: Vec<&str> = key.split('.').collect();
+            while parts.len() > 1 {
+                parts.pop();
+                let parent = parts.join(".");
+                let parent_entry = aggregated.entry(parent).or_insert((0, 0, Vec::new()));
+                parent_entry.0 += remaining;
+                parent_entry.1 += completed;
+                parent_entry.2.extend(ages.iter());
+            }
+        }
+
+        self.project_summaries = aggregated
+            .into_iter()
+            .map(|(name, (remaining, completed, ages))| {
+                let total = remaining + completed;
+                let avg_age_days = if ages.is_empty() {
+                    0.0
+                } else {
+                    ages.iter().sum::<i64>() as f64 / ages.len() as f64
+                };
+                ProjectSummary {
+                    name,
+                    remaining,
+                    completed,
+                    total,
+                    avg_age_days,
+                }
+            })
+            .collect();
+    }
+
+    pub fn selected_project_summary(&self) -> Option<&ProjectSummary> {
+        match self.selected_project_name() {
+            Some(name) => self.project_summaries.iter().find(|s| s.name == name),
+            None => None,
+        }
+    }
+
+    pub fn all_projects_summary(&self) -> (usize, usize) {
+        let remaining: usize = self.project_summaries.iter().map(|s| s.remaining).sum();
+        let completed: usize = self.project_summaries.iter().map(|s| s.completed).sum();
+        (remaining, completed)
     }
 
     pub fn filtered_tasks(&self) -> Vec<&Task> {
@@ -518,6 +721,27 @@ impl App {
                 })
                 .collect()
         };
+
+        // Live search filter — matches against description, project, tags
+        let search = if self.input_mode == InputMode::Filter {
+            &self.input_buffer
+        } else {
+            &self.filter_text
+        };
+        if !search.is_empty() {
+            let needle = search.to_lowercase();
+            tasks.retain(|t| {
+                t.description.to_lowercase().contains(&needle)
+                    || t.project
+                        .as_ref()
+                        .map(|p| p.to_lowercase().contains(&needle))
+                        .unwrap_or(false)
+                    || t.tags
+                        .as_ref()
+                        .map(|tags| tags.iter().any(|tag| tag.to_lowercase().contains(&needle)))
+                        .unwrap_or(false)
+            });
+        }
 
         tasks.sort_by(|a, b| {
             let proj_a = a.project.as_deref().unwrap_or("");
@@ -614,18 +838,38 @@ impl App {
 
         if task.is_recurring_instance() {
             self.confirm_options = vec![
-                ConfirmOption { label: "This instance only".into(), key: 't', action: ConfirmActionKind::DeleteInstance },
-                ConfirmOption { label: "All future instances".into(), key: 'a', action: ConfirmActionKind::DeleteAll },
-                ConfirmOption { label: "Cancel".into(), key: 'c', action: ConfirmActionKind::Cancel },
+                ConfirmOption {
+                    label: "This instance only".into(),
+                    key: 't',
+                    action: ConfirmActionKind::DeleteInstance,
+                },
+                ConfirmOption {
+                    label: "All future instances".into(),
+                    key: 'a',
+                    action: ConfirmActionKind::DeleteAll,
+                },
+                ConfirmOption {
+                    label: "Cancel".into(),
+                    key: 'c',
+                    action: ConfirmActionKind::Cancel,
+                },
             ];
         } else {
             self.confirm_options = vec![
-                ConfirmOption { label: "Yes".into(), key: 'y', action: ConfirmActionKind::DeleteInstance },
-                ConfirmOption { label: "No".into(), key: 'n', action: ConfirmActionKind::Cancel },
+                ConfirmOption {
+                    label: "Yes".into(),
+                    key: 'y',
+                    action: ConfirmActionKind::DeleteInstance,
+                },
+                ConfirmOption {
+                    label: "No".into(),
+                    key: 'n',
+                    action: ConfirmActionKind::Cancel,
+                },
             ];
         }
 
-        self.confirm_selected = self.confirm_options.len() - 1;
+        self.confirm_selected = 0;
         self.input_mode = InputMode::Confirm;
     }
 
@@ -637,21 +881,46 @@ impl App {
         };
         drop(filtered);
 
+        if task.status.as_deref() == Some("completed") {
+            self.status_msg = "Task already completed".to_string();
+            return;
+        }
+        if task.status.as_deref() == Some("deleted") {
+            self.status_msg = "Task is deleted".to_string();
+            return;
+        }
+
         self.confirm_msg = format!("Complete '{}'", task.description);
 
         if task.is_recurring_instance() {
             self.confirm_options = vec![
-                ConfirmOption { label: "This instance".into(), key: 'y', action: ConfirmActionKind::DoneInstance },
-                ConfirmOption { label: "Cancel".into(), key: 'c', action: ConfirmActionKind::Cancel },
+                ConfirmOption {
+                    label: "This instance".into(),
+                    key: 'y',
+                    action: ConfirmActionKind::DoneInstance,
+                },
+                ConfirmOption {
+                    label: "Cancel".into(),
+                    key: 'c',
+                    action: ConfirmActionKind::Cancel,
+                },
             ];
         } else {
             self.confirm_options = vec![
-                ConfirmOption { label: "Yes".into(), key: 'y', action: ConfirmActionKind::DoneInstance },
-                ConfirmOption { label: "No".into(), key: 'n', action: ConfirmActionKind::Cancel },
+                ConfirmOption {
+                    label: "Yes".into(),
+                    key: 'y',
+                    action: ConfirmActionKind::DoneInstance,
+                },
+                ConfirmOption {
+                    label: "No".into(),
+                    key: 'n',
+                    action: ConfirmActionKind::Cancel,
+                },
             ];
         }
 
-        self.confirm_selected = self.confirm_options.len() - 1;
+        self.confirm_selected = 0;
         self.input_mode = InputMode::Confirm;
     }
 
@@ -889,9 +1158,63 @@ impl App {
         self.refresh();
     }
 
+    // Report switching
+    pub fn set_report(&mut self, report: Report) {
+        self.active_report = report;
+        self.selected_task = 0;
+        self.refresh();
+    }
+
+    pub fn next_report(&mut self) {
+        self.set_report(self.active_report.next());
+    }
+
+    pub fn prev_report(&mut self) {
+        self.set_report(self.active_report.prev());
+    }
+
+    // Filter
+    pub fn open_filter(&mut self) {
+        self.input_buffer = self.filter_text.clone();
+        self.input_mode = InputMode::Filter;
+    }
+
+    /// Called on every keystroke in filter mode to keep selection in bounds
+    pub fn filter_changed(&mut self) {
+        let len = self.filtered_tasks().len();
+        if len == 0 {
+            self.selected_task = 0;
+        } else if self.selected_task >= len {
+            self.selected_task = len - 1;
+        }
+    }
+
+    pub fn submit_filter(&mut self) {
+        self.filter_text = self.input_buffer.clone();
+        self.input_buffer.clear();
+        self.input_mode = InputMode::Normal;
+        if self.filter_text.is_empty() {
+            self.status_msg = "Filter cleared".to_string();
+        } else {
+            self.status_msg = format!("Filter: {}", self.filter_text);
+        }
+    }
+
+    pub fn clear_filter(&mut self) {
+        self.filter_text.clear();
+        self.input_buffer.clear();
+        self.input_mode = InputMode::Normal;
+        self.selected_task = 0;
+        self.status_msg = "Filter cleared".to_string();
+    }
+
     pub fn toggle_start_selected(&mut self) {
         let filtered = self.filtered_tasks();
         if let Some(task) = filtered.get(self.selected_task) {
+            if task.status.as_deref() != Some("pending") {
+                self.status_msg = "Can only start/stop pending tasks".to_string();
+                return;
+            }
             if let Some(ref uuid) = task.uuid {
                 if task.is_started() {
                     let _ = taskwarrior::stop_task(uuid);

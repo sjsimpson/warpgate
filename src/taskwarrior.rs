@@ -30,6 +30,12 @@ pub fn get_projects(tasks: &[Task]) -> Vec<String> {
     for task in tasks {
         if let Some(ref p) = task.project {
             projects.insert(p.clone());
+            // Ensure all ancestor projects exist
+            let mut parts: Vec<&str> = p.split('.').collect();
+            while parts.len() > 1 {
+                parts.pop();
+                projects.insert(parts.join("."));
+            }
         }
     }
     projects.into_iter().collect()

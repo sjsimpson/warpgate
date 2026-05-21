@@ -41,6 +41,7 @@ fn main() -> Result<()> {
                     InputMode::TaskForm => handle_task_form(&mut app, key.code),
                     InputMode::Annotate => handle_text_input(&mut app, key.code, true),
                     InputMode::Denotate => handle_denotate(&mut app, key.code),
+                    InputMode::Filter => handle_filter(&mut app, key.code),
                 }
             }
         }
@@ -63,19 +64,24 @@ fn handle_normal(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('l') | KeyCode::Right => app.next_pane(),
         KeyCode::Char('1') => app.active_pane = app::Pane::Tasks,
         KeyCode::Char('2') => app.active_pane = app::Pane::Projects,
-        KeyCode::Char('d') => app.request_done(),
-        KeyCode::Char('x') => app.request_delete(),
-        KeyCode::Char('s') => app.toggle_start_selected(),
+        // Task-specific actions — only in Tasks pane
+        KeyCode::Char('d') if app.active_pane == app::Pane::Tasks => app.request_done(),
+        KeyCode::Char('x') if app.active_pane == app::Pane::Tasks => app.request_delete(),
+        KeyCode::Char('s') if app.active_pane == app::Pane::Tasks => app.toggle_start_selected(),
+        KeyCode::Char('m') if app.active_pane == app::Pane::Tasks => app.open_modify_form(),
+        KeyCode::Char('n') if app.active_pane == app::Pane::Tasks => app.open_annotate(),
+        KeyCode::Char('N') if app.active_pane == app::Pane::Tasks => app.open_denotate(),
+        KeyCode::Char('D') if app.active_pane == app::Pane::Tasks => app.duplicate_selected(),
+        // Global actions
         KeyCode::Char('a') => app.open_add_form(),
-        KeyCode::Char('m') => app.open_modify_form(),
-        KeyCode::Char('n') => app.open_annotate(),
-        KeyCode::Char('N') => app.open_denotate(),
-        KeyCode::Char('D') => app.duplicate_selected(),
         KeyCode::Char('u') => app.undo(),
         KeyCode::Char('r') => {
             app.refresh();
             app.status_msg = "Refreshed".to_string();
         }
+        KeyCode::Char('/') => app.open_filter(),
+        KeyCode::Char(']') if app.active_pane == app::Pane::Tasks => app.next_report(),
+        KeyCode::Char('[') if app.active_pane == app::Pane::Tasks => app.prev_report(),
         KeyCode::Char('?') => {
             app.input_mode = InputMode::Help;
         }
@@ -133,11 +139,7 @@ fn handle_task_form(app: &mut App, key: KeyCode) {
         }
         KeyCode::Tab => {
             if let Some(ref mut form) = app.task_form {
-                if form.is_advanced {
-                    form.docs_focused = true;
-                } else {
-                    form.next_field();
-                }
+                form.docs_focused = true;
             }
         }
         KeyCode::Down => {
@@ -192,6 +194,22 @@ fn handle_denotate(app: &mut App, key: KeyCode) {
         KeyCode::Enter => app.submit_denotate(),
         KeyCode::Esc | KeyCode::Char('q') => {
             app.input_mode = InputMode::Normal;
+        }
+        _ => {}
+    }
+}
+
+fn handle_filter(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Enter => app.submit_filter(),
+        KeyCode::Esc => app.clear_filter(),
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+            app.filter_changed();
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+            app.filter_changed();
         }
         _ => {}
     }

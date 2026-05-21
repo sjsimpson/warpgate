@@ -4,7 +4,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap,
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table,
+        TableState, Wrap,
     },
 };
 
@@ -18,21 +19,26 @@ pub fn draw(f: &mut Frame, app: &App) {
         Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
             .areas(main_area);
 
-    let [tasks_area, projects_area] =
-        Layout::vertical([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(left_area);
+    let [tasks_area, projects_area, stats_area] = Layout::vertical([
+        Constraint::Percentage(50),
+        Constraint::Percentage(25),
+        Constraint::Percentage(25),
+    ])
+    .areas(left_area);
 
     draw_tasks(f, app, tasks_area);
     draw_projects(f, app, projects_area);
+    draw_stats(f, app, stats_area);
     draw_detail(f, app, detail_area);
     draw_status(f, app, status_area);
 
     match app.input_mode {
-        InputMode::Help => draw_help(f),
+        InputMode::Help => draw_help(f, app),
         InputMode::Confirm => draw_confirm(f, app),
         InputMode::TaskForm => draw_task_form(f, app),
         InputMode::Annotate => draw_annotate(f, app),
         InputMode::Denotate => draw_denotate(f, app),
-        InputMode::Normal => {}
+        InputMode::Normal | InputMode::Filter => {}
     }
 }
 
@@ -66,13 +72,16 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
     let rows: Vec<Row> = filtered
         .iter()
         .enumerate()
-        .map(|(i, task)| {
-            let style = if i == app.selected_task {
-                Style::default().fg(Color::Black).bg(Color::Cyan)
-            } else if task.is_started() {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::White)
+        .map(|(_, task)| {
+            let style = match task.status.as_deref() {
+                _ if task.is_started() => Style::default().fg(Color::Green),
+                Some("completed") => Style::default().fg(Color::DarkGray),
+                Some("deleted") => Style::default().fg(Color::Red).add_modifier(Modifier::DIM),
+                Some("recurring") => Style::default().fg(Color::Magenta),
+                Some("waiting") => Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::DIM),
+                _ => Style::default().fg(Color::White), // pending
             };
 
             let desc_cell = if task.is_recurring() {
@@ -109,20 +118,40 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().fg(Color::White)
     };
+
+    let mut title_spans: Vec<Span> = vec![
+        Span::styled(" [1] ", pane_num_style),
+        Span::styled(
+            "Tasks ",
+            if app.active_pane == Pane::Tasks {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ),
+    ];
+    for report in crate::app::ALL_REPORTS {
+        if *report == app.active_report {
+            title_spans.push(Span::styled(
+                format!(" {} ", report.label()),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            title_spans.push(Span::styled(
+                format!(" {} ", report.label()),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+    title_spans.push(Span::raw(" "));
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title(Line::from(vec![
-            Span::styled(" [1] ", pane_num_style),
-            Span::styled(
-                "Tasks ",
-                if app.active_pane == Pane::Tasks {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                },
-            ),
-        ]))
+        .title(Line::from(title_spans))
         .border_style(Style::default().fg(pane_border_color(app, Pane::Tasks)));
 
     let table = Table::new(
@@ -139,30 +168,43 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(header)
-    .block(block);
+    .block(block)
+    .row_highlight_style(if app.active_pane == Pane::Tasks {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default()
+    });
 
-    f.render_widget(table, area);
+    let selected = if app.active_pane == Pane::Tasks {
+        Some(app.selected_task)
+    } else {
+        None
+    };
+    let mut state = TableState::default().with_selected(selected);
+    f.render_stateful_widget(table, area, &mut state);
 }
 
 fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.active_pane == Pane::Projects;
+
     let items: Vec<ListItem> = app
         .project_list_items()
         .iter()
         .enumerate()
-        .map(|(i, name)| {
-            let style = if i == app.selected_project {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+        .map(|(_, name)| {
+            let prefix = "  ";
+            let display = if name == "(all)" {
+                format!("{}(all)", prefix)
             } else {
-                Style::default().fg(Color::White)
+                let depth = name.matches('.').count();
+                let leaf = name.rsplit('.').next().unwrap_or(name);
+                format!("{}{}{}", prefix, "  ".repeat(depth), leaf)
             };
-            ListItem::new(format!("  {}", name)).style(style)
+            ListItem::new(display).style(Style::default().fg(Color::White))
         })
         .collect();
 
-    let pane_num_style = if app.active_pane == Pane::Projects {
+    let pane_num_style = if focused {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
@@ -176,7 +218,7 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(" [2] ", pane_num_style),
             Span::styled(
                 "Projects ",
-                if app.active_pane == Pane::Projects {
+                if focused {
                     Style::default().add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
@@ -185,8 +227,222 @@ fn draw_projects(f: &mut Frame, app: &App, area: Rect) {
         ]))
         .border_style(Style::default().fg(pane_border_color(app, Pane::Projects)));
 
-    let list = List::new(items).block(block);
-    f.render_widget(list, area);
+    let highlight = if focused {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+    };
+
+    let list = List::new(items).block(block).highlight_style(highlight,
+    );
+
+    let mut state = ListState::default().with_selected(Some(app.selected_project));
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_stats(f: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let label = Style::default().fg(Color::Yellow);
+    let val = Style::default().fg(Color::White);
+    match app.selected_project_summary() {
+        Some(summary) => {
+            // Single project stats
+            let pct = if summary.total > 0 {
+                (summary.completed as f64 / summary.total as f64 * 100.0) as u16
+            } else {
+                0
+            };
+
+            let age_str = if summary.avg_age_days < 1.0 {
+                "today".to_string()
+            } else if summary.avg_age_days < 7.0 {
+                format!("{:.0}d", summary.avg_age_days)
+            } else if summary.avg_age_days < 30.0 {
+                format!("{:.0}w", summary.avg_age_days / 7.0)
+            } else {
+                format!("{:.0}mo", summary.avg_age_days / 30.0)
+            };
+
+            let prefix = format!(" {:>3}% ", pct);
+            let bar_len = (area.width as usize).saturating_sub(prefix.len() + 2);
+            let filled = if bar_len > 0 {
+                (bar_len * pct as usize) / 100
+            } else {
+                0
+            };
+            let empty = bar_len.saturating_sub(filled);
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+
+            let dim = Style::default().fg(Color::DarkGray);
+
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(prefix, val),
+                    Span::styled(bar, Style::default().fg(Color::Green)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Remaining    ", label),
+                    Span::styled(format!("{}", summary.remaining), val),
+                    Span::styled("   ", val),
+                    Span::styled("Completed  ", label),
+                    Span::styled(format!("{}", summary.completed), val),
+                    Span::styled("   ", val),
+                    Span::styled("Avg age  ", label),
+                    Span::styled(age_str, val),
+                ]),
+            ];
+
+            // Sub-project breakdown
+            let children: Vec<&crate::app::ProjectSummary> = app
+                .project_summaries
+                .iter()
+                .filter(|s| {
+                    s.name != summary.name
+                        && s.name.starts_with(&summary.name)
+                        && s.name[summary.name.len()..].starts_with('.')
+                        && s.name[summary.name.len() + 1..].find('.').is_none()
+                        && s.remaining > 0
+                })
+                .collect();
+
+            if !children.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " Sub-projects",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for child in &children {
+                    let child_leaf = child.name.rsplit('.').next().unwrap_or(&child.name);
+                    let child_pct = if child.total > 0 {
+                        (child.completed as f64 / child.total as f64 * 100.0) as u16
+                    } else {
+                        0
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("   {:<14}", child_leaf), val),
+                        Span::styled(format!("{:>3}%", child_pct), dim),
+                        Span::styled(format!("  {} left", child.remaining), dim),
+                    ]));
+                }
+            }
+
+            // Upcoming due dates
+            let filtered = app.filtered_tasks();
+            let mut upcoming: Vec<(&str, String)> = filtered
+                .iter()
+                .filter(|t| t.due.is_some())
+                .map(|t| (t.description.as_str(), t.due_short()))
+                .collect();
+            upcoming.truncate(5);
+
+            if !upcoming.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " Upcoming",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                for (desc, due) in &upcoming {
+                    let short_desc: String = desc.chars().take(20).collect();
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("   {} ", due), dim),
+                        Span::styled(short_desc, val),
+                    ]));
+                }
+            }
+
+            let title = format!(" {} ", summary.name);
+            let paragraph = Paragraph::new(lines)
+                .block(block.title(title))
+                .wrap(Wrap { trim: false });
+            f.render_widget(paragraph, area);
+        }
+        None => {
+            // All projects overview — skip 100% complete, indent sub-projects
+            let active: Vec<&crate::app::ProjectSummary> = app
+                .project_summaries
+                .iter()
+                .filter(|s| s.remaining > 0)
+                .collect();
+
+            // Build display names with indentation for sub-projects
+            let display_names: Vec<String> = active
+                .iter()
+                .map(|s| {
+                    if let Some(dot_pos) = s.name.rfind('.') {
+                        format!("  {}", &s.name[dot_pos + 1..])
+                    } else {
+                        s.name.clone()
+                    }
+                })
+                .collect();
+
+            let max_name_len = display_names.iter().map(|n| n.len()).max().unwrap_or(8);
+            let name_col = max_name_len + 2; // padding
+
+            let max_remaining_len = active
+                .iter()
+                .map(|s| format!("{}", s.remaining).len())
+                .max()
+                .unwrap_or(1);
+
+            let mut lines: Vec<Line> = Vec::new();
+            for (i, summary) in active.iter().enumerate() {
+                let pct = if summary.total > 0 {
+                    (summary.completed as f64 / summary.total as f64 * 100.0) as u16
+                } else {
+                    0
+                };
+
+                let prefix = format!(
+                    " {:<name_w$} {:>rem_w$} left {:>3}% ",
+                    display_names[i],
+                    summary.remaining,
+                    pct,
+                    name_w = name_col,
+                    rem_w = max_remaining_len,
+                );
+
+                let bar_len = (area.width as usize).saturating_sub(prefix.len() + 2);
+                let filled = if bar_len > 0 {
+                    (bar_len * pct as usize) / 100
+                } else {
+                    0
+                };
+                let empty = bar_len.saturating_sub(filled);
+                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, val),
+                    Span::styled(bar, Style::default().fg(Color::Green)),
+                ]));
+            }
+
+            if lines.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    " All projects complete!",
+                    Style::default().fg(Color::Green),
+                )));
+            }
+
+            let (remaining, completed) = app.all_projects_summary();
+            let title = format!(" Summary ({} pending, {} done) ", remaining, completed);
+            let paragraph = Paragraph::new(lines).block(block.title(title));
+            f.render_widget(paragraph, area);
+        }
+    }
 }
 
 fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
@@ -345,16 +601,39 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let help = " ?:help  a:add  m:modify  n/N:note  d:done  x:del  s:start  D:dup  u:undo ";
+    if app.input_mode == InputMode::Filter {
+        let input_line = Line::from(vec![
+            Span::styled(
+                " /",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(&app.input_buffer, Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::DarkGray)),
+        ]);
+        let paragraph = Paragraph::new(input_line);
+        f.render_widget(paragraph, area);
+        return;
+    }
+
+    let filter_label = if app.filter_text.is_empty() {
+        String::new()
+    } else {
+        format!(" filter: {}", app.filter_text)
+    };
+    let help = "  ?:help  a:add  m:modify  d:done  x:del  /:filter  [/]:views ";
+
     let status_line = if app.status_msg.is_empty() {
-        Line::from(vec![Span::styled(
-            help,
-            Style::default().fg(Color::DarkGray),
-        )])
+        Line::from(vec![
+            Span::styled(&filter_label, Style::default().fg(Color::Yellow)),
+            Span::styled(help, Style::default().fg(Color::DarkGray)),
+        ])
     } else {
         Line::from(vec![
+            Span::styled(&filter_label, Style::default().fg(Color::Yellow)),
+            Span::styled(" ", Style::default()),
             Span::styled(&app.status_msg, Style::default().fg(Color::Green)),
-            Span::styled("  ", Style::default()),
             Span::styled(help, Style::default().fg(Color::DarkGray)),
         ])
     };
@@ -369,13 +648,13 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     let max_option_len = app
         .confirm_options
         .iter()
-        .map(|o| o.label.len() + 6) // " k  Label "
+        .map(|o| o.label.len() + 6)
         .max()
         .unwrap_or(10) as u16;
     let width = (app.confirm_msg.len() as u16 + 4)
         .max(max_option_len + 4)
         .max(30);
-    let height = app.confirm_options.len() as u16 + 4; // msg + blank + options + borders
+    let height = app.confirm_options.len() as u16 + 4;
     let area = centered_rect_abs(width, height, f.area());
 
     f.render_widget(Clear, area);
@@ -426,8 +705,6 @@ fn draw_task_form(f: &mut Frame, app: &App) {
 
     let title = if form.editing_uuid.is_some() {
         " Modify Task "
-    } else if form.is_advanced {
-        " New Task (Advanced) "
     } else {
         " New Task "
     };
@@ -435,7 +712,6 @@ fn draw_task_form(f: &mut Frame, app: &App) {
     let fields = form.visible_fields();
 
     {
-        // Floating window — ~85% of terminal, centered
         let term = f.area();
         let w = (term.width * 17 / 20).min(140);
         let h = (term.height * 4 / 5).min(40);
@@ -457,7 +733,6 @@ fn draw_task_form(f: &mut Frame, app: &App) {
             Color::DarkGray
         };
 
-        // Form pane
         let form_title = if form.docs_focused {
             format!("{}", title.trim())
         } else {
@@ -478,7 +753,6 @@ fn draw_task_form(f: &mut Frame, app: &App) {
             .wrap(Wrap { trim: false });
         f.render_widget(form_widget, form_area);
 
-        // Docs pane
         let docs_title = if form.docs_focused {
             format!(
                 " {} (j/k:scroll  Tab:back  Esc:back) ",
@@ -521,7 +795,6 @@ fn build_form_lines(
         .add_modifier(Modifier::BOLD);
 
     for field in fields {
-        // Section headers for visual grouping
         if let Some(header) = field.section_header() {
             if !lines.is_empty() {
                 lines.push(Line::from(""));
@@ -548,16 +821,13 @@ fn build_form_lines(
         ]));
 
         let value = form.get_field(*field);
-        // Description gets extra height for multiline display
         if *field == crate::app::FormField::Description {
             if is_active {
-                // Show value with cursor, wrapping across multiple visual lines
                 let display = format!("    {}_", value);
                 lines.push(Line::from(Span::styled(
                     display,
                     Style::default().fg(Color::White),
                 )));
-                // Reserve visual space
                 lines.push(Line::from(""));
             } else if value.is_empty() {
                 lines.push(Line::from(Span::styled(
@@ -651,7 +921,7 @@ fn draw_denotate(f: &mut Frame, app: &App) {
     f.render_widget(list, area);
 }
 
-fn draw_help(f: &mut Frame) {
+fn draw_help(f: &mut Frame, app: &App) {
     let section_style = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
@@ -660,17 +930,19 @@ fn draw_help(f: &mut Frame) {
         .add_modifier(Modifier::BOLD);
     let desc_style = Style::default().fg(Color::White);
 
-    let groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
+    let mut groups: Vec<(&str, Vec<(&str, &str)>)> = vec![
         (
             "Navigation",
             vec![
-                ("j / DownArrow", "Next item"),
-                ("k / UpArrow", "Prev item"),
-                ("l / RightArrow", "Next pane"),
-                ("h / LeftArrow", "Prev pane"),
+                ("j / k / Up / Down", "Navigate items"),
+                ("h / l / Left / Right", "Switch pane"),
+                ("1 / 2", "Jump to Tasks / Projects"),
             ],
         ),
-        (
+    ];
+
+    if app.active_pane == Pane::Tasks {
+        groups.push((
             "Tasks",
             vec![
                 ("a", "Add new task"),
@@ -680,21 +952,36 @@ fn draw_help(f: &mut Frame) {
                 ("s", "Start / stop task"),
                 ("D", "Duplicate task"),
             ],
-        ),
-        (
+        ));
+        groups.push((
             "Annotations",
             vec![("n", "Add annotation"), ("N", "Remove annotation")],
-        ),
-        (
-            "General",
+        ));
+        groups.push((
+            "Views",
             vec![
-                ("u", "Undo last action"),
-                ("r", "Refresh from taskwarrior"),
-                ("?", "Toggle this help"),
-                ("q / Ctrl+C", "Quit"),
+                ("[ / ]", "Cycle views (pending/all/done/overdue/active)"),
             ],
-        ),
-    ];
+        ));
+    } else {
+        groups.push((
+            "Tasks",
+            vec![
+                ("a", "Add new task"),
+            ],
+        ));
+    }
+
+    groups.push((
+        "General",
+        vec![
+            ("/", "Filter tasks"),
+            ("u", "Undo last action"),
+            ("r", "Refresh from taskwarrior"),
+            ("?", "Toggle this help"),
+            ("q / Ctrl+C", "Quit"),
+        ],
+    ));
 
     let mut lines: Vec<Line> = vec![Line::from("")];
     for (i, (section, binds)) in groups.iter().enumerate() {
@@ -715,7 +1002,7 @@ fn draw_help(f: &mut Frame) {
     lines.push(Line::from(""));
 
     let height = lines.len() as u16 + 2;
-    let area = centered_rect_abs(60, height, f.area());
+    let area = centered_rect_abs(70, height, f.area());
     f.render_widget(Clear, area);
 
     let paragraph = Paragraph::new(lines).block(
