@@ -710,37 +710,86 @@ fn draw_task_form(f: &mut Frame, app: &App) {
     };
 
     let fields = form.visible_fields();
+    let term = f.area();
+    let w = (term.width * 17 / 20).min(140);
+    let h = (term.height * 4 / 5).min(40);
+    let area = centered_rect_abs(w, h, term);
+    f.render_widget(Clear, area);
 
-    {
-        let term = f.area();
-        let w = (term.width * 17 / 20).min(140);
-        let h = (term.height * 4 / 5).min(40);
-        let area = centered_rect_abs(w, h, term);
-        f.render_widget(Clear, area);
-
-        let [form_area, docs_area] =
+    if form.dep_picker_active {
+        // Split: form left, dep picker right
+        let [form_area, picker_area] =
             Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .areas(area);
 
-        let form_border = if form.docs_focused {
-            Color::DarkGray
-        } else {
-            Color::Yellow
-        };
-        let docs_border = if form.docs_focused {
-            Color::Cyan
-        } else {
-            Color::DarkGray
-        };
-
-        let form_title = if form.docs_focused {
-            format!("{}", title.trim())
-        } else {
-            format!(
-                "{} (Up/Down:fields  Tab:docs  Enter:submit  Esc:cancel)",
-                title.trim()
+        // Form pane (dimmed)
+        let form_lines = build_form_lines(form, &fields);
+        let form_widget = Paragraph::new(form_lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(format!("{}", title.trim()))
+                    .border_style(Style::default().fg(Color::DarkGray)),
             )
+            .wrap(Wrap { trim: false });
+        f.render_widget(form_widget, form_area);
+
+        // Dep picker pane
+        let visible = form.filtered_dep_choices();
+        let items: Vec<ListItem> = visible
+            .iter()
+            .enumerate()
+            .map(|(vi, &idx)| {
+                let choice = &form.dep_choices[idx];
+                let check = if choice.selected { "[x]" } else { "[ ]" };
+                let id_str = choice.id.map(|i| format!("{}", i)).unwrap_or_default();
+                let proj = choice.project.as_deref().unwrap_or("");
+                let text = if proj.is_empty() {
+                    format!("  {} {:>3}  {}", check, id_str, choice.description)
+                } else {
+                    format!("  {} {:>3}  {}  ({})", check, id_str, choice.description, proj)
+                };
+                let style = if vi == form.dep_picker_cursor {
+                    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+                } else if choice.selected {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                ListItem::new(text).style(style)
+            })
+            .collect();
+
+        let filter_display = if form.dep_picker_filter.is_empty() {
+            String::new()
+        } else {
+            format!("  filter: {}", form.dep_picker_filter)
         };
+        let picker_title = format!(
+            " Dependencies (j/k:nav  Enter:toggle  Tab/Esc:done){} ",
+            filter_display
+        );
+        let list = List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(picker_title)
+                .border_style(Style::default().fg(Color::Cyan)),
+        );
+        f.render_widget(list, picker_area);
+    } else {
+        // Single-pane form
+        let dep_hint = if form.active_field == crate::app::FormField::Depends {
+            " (Tab:pick deps)"
+        } else {
+            ""
+        };
+        let form_title = format!(
+            "{} (Up/Down:fields  Enter:submit  Esc:cancel){}",
+            title.trim(),
+            dep_hint
+        );
         let form_lines = build_form_lines(form, &fields);
         let form_widget = Paragraph::new(form_lines)
             .block(
@@ -748,40 +797,10 @@ fn draw_task_form(f: &mut Frame, app: &App) {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .title(form_title)
-                    .border_style(Style::default().fg(form_border)),
+                    .border_style(Style::default().fg(Color::Yellow)),
             )
             .wrap(Wrap { trim: false });
-        f.render_widget(form_widget, form_area);
-
-        let docs_title = if form.docs_focused {
-            format!(
-                " {} (j/k:scroll  Tab:back  Esc:back) ",
-                form.active_field.label()
-            )
-        } else {
-            format!(" {} ", form.active_field.label())
-        };
-        let docs_text = form.active_field.docs();
-        let docs_lines: Vec<Line> = docs_text
-            .lines()
-            .map(|l| {
-                Line::from(Span::styled(
-                    format!(" {}", l),
-                    Style::default().fg(Color::White),
-                ))
-            })
-            .collect();
-        let docs_widget = Paragraph::new(docs_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .title(docs_title)
-                    .border_style(Style::default().fg(docs_border)),
-            )
-            .wrap(Wrap { trim: false })
-            .scroll((form.docs_scroll, 0));
-        f.render_widget(docs_widget, docs_area);
+        f.render_widget(form_widget, area);
     }
 }
 
@@ -860,7 +879,9 @@ fn build_form_lines(
 }
 
 fn draw_annotate(f: &mut Frame, app: &App) {
-    let area = centered_rect_abs(60, 3, f.area());
+    let term = f.area();
+    let w = (term.width * 3 / 4).min(100);
+    let area = centered_rect_abs(w, 6, term);
     f.render_widget(Clear, area);
 
     let input = Paragraph::new(app.input_buffer.as_str())
@@ -871,10 +892,17 @@ fn draw_annotate(f: &mut Frame, app: &App) {
                 .title(" Add Annotation (Enter:submit  Esc:cancel) ")
                 .border_style(Style::default().fg(Color::Yellow)),
         )
-        .style(Style::default().fg(Color::White));
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: false });
 
     f.render_widget(input, area);
-    f.set_cursor_position((area.x + app.input_buffer.len() as u16 + 1, area.y + 1));
+
+    // Place cursor accounting for wrapping
+    let inner_width = (area.width - 2) as usize;
+    let cursor_pos = app.input_buffer.len();
+    let cursor_y = area.y + 1 + (cursor_pos / inner_width) as u16;
+    let cursor_x = area.x + 1 + (cursor_pos % inner_width) as u16;
+    f.set_cursor_position((cursor_x, cursor_y));
 }
 
 fn draw_denotate(f: &mut Frame, app: &App) {
@@ -887,9 +915,14 @@ fn draw_denotate(f: &mut Frame, app: &App) {
         _ => return,
     };
 
-    let height = annotations.len() as u16 + 2;
-    let area = centered_rect_abs(70, height.min(20), f.area());
+    let term = f.area();
+    let w = (term.width * 3 / 4).min(100);
+    let height = (annotations.len() as u16 * 2 + 2).min(term.height * 3 / 4);
+    let area = centered_rect_abs(w, height, term);
     f.render_widget(Clear, area);
+
+    let dim = Style::default().fg(Color::DarkGray);
+    let val = Style::default().fg(Color::White);
 
     let items: Vec<ListItem> = annotations
         .iter()
@@ -897,16 +930,19 @@ fn draw_denotate(f: &mut Frame, app: &App) {
         .map(|(i, ann)| {
             let date = ann.entry.as_deref().map(format_date).unwrap_or_default();
             let desc = ann.description.as_deref().unwrap_or("");
-            let text = format!("  {} {}", date, desc);
+            let lines = vec![
+                Line::from(Span::styled(format!("  {}", date), dim)),
+                Line::from(Span::styled(format!("  {}", desc), val)),
+            ];
             let style = if i == app.selected_annotation {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Red)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default()
             };
-            ListItem::new(text).style(style)
+            ListItem::new(lines).style(style)
         })
         .collect();
 

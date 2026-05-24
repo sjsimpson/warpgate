@@ -1,6 +1,7 @@
 use chrono::Utc;
 use color_eyre::Result;
 
+use crate::db;
 use crate::task::Task;
 use crate::taskwarrior;
 
@@ -397,6 +398,14 @@ impl FormField {
     }
 }
 
+pub struct DepChoice {
+    pub uuid: String,
+    pub id: Option<i64>,
+    pub description: String,
+    pub project: Option<String>,
+    pub selected: bool,
+}
+
 pub struct TaskForm {
     pub description: String,
     pub project: String,
@@ -410,8 +419,11 @@ pub struct TaskForm {
     pub depends: String,
     pub active_field: FormField,
     pub editing_uuid: Option<String>,
-    pub docs_focused: bool,
-    pub docs_scroll: u16,
+    // Dependency picker
+    pub dep_picker_active: bool,
+    pub dep_picker_filter: String,
+    pub dep_picker_cursor: usize,
+    pub dep_choices: Vec<DepChoice>,
 }
 
 impl TaskForm {
@@ -429,8 +441,10 @@ impl TaskForm {
             depends: String::new(),
             active_field: FormField::Description,
             editing_uuid: None,
-            docs_focused: false,
-            docs_scroll: 0,
+            dep_picker_active: false,
+            dep_picker_filter: String::new(),
+            dep_picker_cursor: 0,
+            dep_choices: Vec::new(),
         }
     }
 
@@ -448,8 +462,10 @@ impl TaskForm {
             depends: task.depends.clone().unwrap_or_default(),
             active_field: FormField::Description,
             editing_uuid: task.uuid.clone(),
-            docs_focused: false,
-            docs_scroll: 0,
+            dep_picker_active: false,
+            dep_picker_filter: String::new(),
+            dep_picker_cursor: 0,
+            dep_choices: Vec::new(),
         }
     }
 
@@ -464,7 +480,6 @@ impl TaskForm {
             .position(|f| *f == self.active_field)
             .unwrap_or(0);
         self.active_field = fields[(idx + 1) % fields.len()];
-        self.docs_scroll = 0;
     }
 
     pub fn prev_field(&mut self) {
@@ -474,7 +489,75 @@ impl TaskForm {
             .position(|f| *f == self.active_field)
             .unwrap_or(0);
         self.active_field = fields[(idx + fields.len() - 1) % fields.len()];
-        self.docs_scroll = 0;
+    }
+
+    pub fn open_dep_picker(&mut self) {
+        let all_tasks = db::read_tasks_by_status("pending").unwrap_or_default();
+        let current_deps: Vec<&str> = self.depends.split(',').map(|s| s.trim()).collect();
+
+        self.dep_choices = all_tasks
+            .into_iter()
+            .filter(|t| {
+                // Don't show self in picker
+                if let (Some(uuid), Some(editing)) = (&t.uuid, &self.editing_uuid) {
+                    uuid != editing
+                } else {
+                    true
+                }
+            })
+            .map(|t| {
+                let uuid = t.uuid.clone().unwrap_or_default();
+                let id = t.id;
+                let selected = id.map(|i| current_deps.contains(&i.to_string().as_str())).unwrap_or(false)
+                    || current_deps.contains(&uuid.as_str());
+                DepChoice {
+                    uuid,
+                    id,
+                    description: t.description.clone(),
+                    project: t.project.clone(),
+                    selected,
+                }
+            })
+            .collect();
+
+        self.dep_picker_filter.clear();
+        self.dep_picker_cursor = 0;
+        self.dep_picker_active = true;
+    }
+
+    pub fn filtered_dep_choices(&self) -> Vec<usize> {
+        if self.dep_picker_filter.is_empty() {
+            (0..self.dep_choices.len()).collect()
+        } else {
+            let needle = self.dep_picker_filter.to_lowercase();
+            self.dep_choices
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.description.to_lowercase().contains(&needle)
+                        || c.project.as_ref().map(|p| p.to_lowercase().contains(&needle)).unwrap_or(false)
+                })
+                .map(|(i, _)| i)
+                .collect()
+        }
+    }
+
+    pub fn toggle_dep(&mut self) {
+        let visible = self.filtered_dep_choices();
+        if let Some(&idx) = visible.get(self.dep_picker_cursor) {
+            self.dep_choices[idx].selected = !self.dep_choices[idx].selected;
+        }
+    }
+
+    pub fn close_dep_picker(&mut self) {
+        // Commit selections to depends field
+        let selected: Vec<String> = self.dep_choices
+            .iter()
+            .filter(|c| c.selected)
+            .map(|c| c.id.map(|i| i.to_string()).unwrap_or_else(|| c.uuid.clone()))
+            .collect();
+        self.depends = selected.join(", ");
+        self.dep_picker_active = false;
     }
 
     pub fn get_field(&self, field: FormField) -> &str {
@@ -534,7 +617,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Result<Self> {
-        let tasks = taskwarrior::get_pending_tasks().unwrap_or_default();
+        let tasks = db::read_tasks_by_status("pending").unwrap_or_default();
         let projects = taskwarrior::get_projects(&tasks);
 
         let mut app = App {
@@ -560,26 +643,46 @@ impl App {
         Ok(app)
     }
 
-    pub fn load_tasks(&self) -> Vec<Task> {
-        let mut args: Vec<&str> = self.active_report.filter_args();
-        let filter_words: Vec<String>;
-        if !self.filter_text.is_empty() {
-            filter_words = self
-                .filter_text
-                .split_whitespace()
-                .map(|s| s.to_string())
-                .collect();
-            for w in &filter_words {
-                args.push(w.as_str());
+    pub fn load_tasks_from_db(&self) -> Vec<Task> {
+        let all = db::read_all_tasks().unwrap_or_default();
+
+        // Filter by report type
+        let status_filter: Option<&str> = match self.active_report {
+            Report::Pending => Some("pending"),
+            Report::Completed => Some("completed"),
+            Report::All => None,
+            Report::Overdue | Report::Active => Some("pending"),
+        };
+
+        let mut tasks: Vec<Task> = if let Some(status) = status_filter {
+            all.into_iter()
+                .filter(|t| t.status.as_deref() == Some(status))
+                .collect()
+        } else {
+            all
+        };
+
+        // Additional filters for overdue/active
+        match self.active_report {
+            Report::Overdue => {
+                let now = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+                tasks.retain(|t| {
+                    t.due.as_ref().map(|d| d.as_str() < now.as_str()).unwrap_or(false)
+                });
             }
+            Report::Active => {
+                tasks.retain(|t| t.is_started());
+            }
+            _ => {}
         }
-        taskwarrior::get_tasks_with_filter(&args).unwrap_or_default()
+
+        tasks
     }
 
     pub fn refresh(&mut self) {
         let prev_project = self.selected_project_name().map(|s| s.to_string());
 
-        self.tasks = self.load_tasks();
+        self.tasks = self.load_tasks_from_db();
         self.projects = taskwarrior::get_projects(&self.tasks);
 
         // If the selected project no longer exists, fall back to (all)
@@ -604,7 +707,7 @@ impl App {
 
     fn update_project_summaries(&mut self) {
         // Get all tasks (pending + completed) for accurate stats
-        let all_tasks = taskwarrior::get_tasks_with_filter(&[]).unwrap_or_default();
+        let all_tasks = db::read_all_tasks().unwrap_or_default();
         let now = Utc::now().date_naive();
 
         let mut project_map: std::collections::BTreeMap<String, (usize, usize, Vec<i64>)> =

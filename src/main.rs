@@ -1,4 +1,5 @@
 mod app;
+mod db;
 mod task;
 mod taskwarrior;
 mod ui;
@@ -26,6 +27,7 @@ fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new()?;
+    let mut tick_count: u32 = 0;
 
     while app.running {
         terminal.draw(|f| ui::draw(f, &app))?;
@@ -43,6 +45,13 @@ fn main() -> Result<()> {
                     InputMode::Denotate => handle_denotate(&mut app, key.code),
                     InputMode::Filter => handle_filter(&mut app, key.code),
                 }
+            }
+        } else {
+            // Auto-refresh from DB every ~2s when idle in normal mode
+            tick_count += 1;
+            if tick_count >= 20 && app.input_mode == InputMode::Normal {
+                app.refresh();
+                tick_count = 0;
             }
         }
     }
@@ -101,29 +110,50 @@ fn handle_confirm(app: &mut App, key: KeyCode) {
 }
 
 fn handle_task_form(app: &mut App, key: KeyCode) {
-    let is_docs = app.task_form.as_ref().map(|f| f.docs_focused).unwrap_or(false);
+    let picker_active = app
+        .task_form
+        .as_ref()
+        .map(|f| f.dep_picker_active)
+        .unwrap_or(false);
 
-    if is_docs {
-        // Docs pane focused — scroll or switch back
+    if picker_active {
         match key {
             KeyCode::Tab | KeyCode::Esc => {
                 if let Some(ref mut form) = app.task_form {
-                    form.docs_focused = false;
+                    form.close_dep_picker();
                 }
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if let Some(ref mut form) = app.task_form {
-                    form.docs_scroll = form.docs_scroll.saturating_add(1);
+                    let len = form.filtered_dep_choices().len();
+                    if len > 0 && form.dep_picker_cursor < len - 1 {
+                        form.dep_picker_cursor += 1;
+                    }
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if let Some(ref mut form) = app.task_form {
-                    form.docs_scroll = form.docs_scroll.saturating_sub(1);
+                    if form.dep_picker_cursor > 0 {
+                        form.dep_picker_cursor -= 1;
+                    }
                 }
             }
-            KeyCode::Char('q') => {
-                app.task_form = None;
-                app.input_mode = InputMode::Normal;
+            KeyCode::Enter => {
+                if let Some(ref mut form) = app.task_form {
+                    form.toggle_dep();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(ref mut form) = app.task_form {
+                    form.dep_picker_filter.pop();
+                    form.dep_picker_cursor = 0;
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(ref mut form) = app.task_form {
+                    form.dep_picker_filter.push(c);
+                    form.dep_picker_cursor = 0;
+                }
             }
             _ => {}
         }
@@ -138,8 +168,11 @@ fn handle_task_form(app: &mut App, key: KeyCode) {
             app.input_mode = InputMode::Normal;
         }
         KeyCode::Tab => {
+            // Open dep picker when on Depends field
             if let Some(ref mut form) = app.task_form {
-                form.docs_focused = true;
+                if form.active_field == crate::app::FormField::Depends {
+                    form.open_dep_picker();
+                }
             }
         }
         KeyCode::Down => {
