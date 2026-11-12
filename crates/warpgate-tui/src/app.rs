@@ -17,6 +17,13 @@ fn format_tw_date(raw: &Option<String>) -> String {
     }
 }
 
+fn format_tw_datetime(raw: &Option<String>) -> String {
+    raw.as_deref()
+        .and_then(db::parse_tw_date)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%dT%H:%M").to_string())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectSummary {
     pub name: String,
@@ -475,7 +482,7 @@ impl TaskForm {
             until: format_tw_date(&task.until),
             wait: format_tw_date(&task.wait),
             scheduled: format_tw_date(&task.scheduled),
-            remind: task.remind_local(),
+            remind: format_tw_datetime(&task.remind),
             depends: task.depends.clone().unwrap_or_default(),
             active_field: FormField::Description,
             editing_uuid: task.uuid.clone(),

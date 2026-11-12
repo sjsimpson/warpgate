@@ -12,12 +12,20 @@ fn db_path() -> PathBuf {
     PathBuf::from(task_data).join("taskchampion.sqlite3")
 }
 
+const TW_DATE_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+
+pub fn parse_tw_date(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::NaiveDateTime::parse_from_str(raw, TW_DATE_FORMAT)
+        .ok()
+        .map(|dt| dt.and_utc())
+}
+
 /// Convert epoch seconds string to taskwarrior ISO format "20260506T060000Z"
 fn epoch_to_tw(epoch: &str) -> String {
     if let Ok(ts) = epoch.parse::<i64>() {
         let dt = chrono::DateTime::from_timestamp(ts, 0);
         match dt {
-            Some(d) => d.format("%Y%m%dT%H%M%SZ").to_string(),
+            Some(d) => d.format(TW_DATE_FORMAT).to_string(),
             None => epoch.to_string(),
         }
     } else {

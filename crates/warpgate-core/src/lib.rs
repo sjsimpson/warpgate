@@ -1,6 +1,7 @@
 use chrono::{DateTime, NaiveTime, TimeZone, Utc};
 
-pub const DEFAULT_MORNING: NaiveTime = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+const MORNING: NaiveTime = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
+const END_OF_DAY: NaiveTime = NaiveTime::from_hms_opt(23, 59, 59).unwrap();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReminderSource {
@@ -22,14 +23,14 @@ pub struct ReminderInput<'a> {
 }
 
 /// When a task should ping: `remind` if set, else `due`. A due with no
-/// time of day (local midnight, or `eod`) pings at `morning` that day.
-pub fn reminder_at<Tz: TimeZone>(task: &ReminderInput, tz: &Tz, morning: NaiveTime) -> Option<Reminder> {
+/// time of day (local midnight, or `eod`) pings at 9:00 that day.
+pub fn reminder_at<Tz: TimeZone>(task: &ReminderInput, tz: &Tz) -> Option<Reminder> {
     if !matches!(task.status, "pending" | "waiting") {
         return None;
     }
     let reminder = match (task.remind, task.due) {
         (Some(at), _) => Reminder { at, source: ReminderSource::Remind },
-        (None, Some(due)) => Reminder { at: due_reminder(due, tz, morning), source: ReminderSource::Due },
+        (None, Some(due)) => Reminder { at: due_reminder(due, tz), source: ReminderSource::Due },
         (None, None) => return None,
     };
     match task.wait {
@@ -38,14 +39,12 @@ pub fn reminder_at<Tz: TimeZone>(task: &ReminderInput, tz: &Tz, morning: NaiveTi
     }
 }
 
-fn due_reminder<Tz: TimeZone>(due: DateTime<Utc>, tz: &Tz, morning: NaiveTime) -> DateTime<Utc> {
+fn due_reminder<Tz: TimeZone>(due: DateTime<Utc>, tz: &Tz) -> DateTime<Utc> {
     let local = due.with_timezone(tz).naive_local();
-    let start_of_day = NaiveTime::MIN;
-    let end_of_day = NaiveTime::from_hms_opt(23, 59, 59).expect("valid time");
-    if local.time() != start_of_day && local.time() != end_of_day {
+    if local.time() != NaiveTime::MIN && local.time() != END_OF_DAY {
         return due;
     }
-    tz.from_local_datetime(&local.date().and_time(morning))
+    tz.from_local_datetime(&local.date().and_time(MORNING))
         .earliest()
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or(due)
@@ -69,7 +68,7 @@ mod tests {
     }
 
     fn at(task: &ReminderInput) -> Option<Reminder> {
-        reminder_at(task, &mountain(), DEFAULT_MORNING)
+        reminder_at(task, &mountain())
     }
 
     #[test]

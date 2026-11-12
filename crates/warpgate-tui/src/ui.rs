@@ -9,6 +9,7 @@ use ratatui::{
     },
 };
 
+use chrono::Local;
 use warpgate_core::ReminderSource;
 
 use crate::app::{App, InputMode, Pane};
@@ -535,7 +536,7 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
             }
 
             if let Some(reminder) = t.reminder() {
-                let at = reminder.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
+                let at = reminder.at.with_timezone(&Local).format("%Y-%m-%d %H:%M");
                 let text = match reminder.source {
                     ReminderSource::Remind => at.to_string(),
                     ReminderSource::Due => format!("{at} (from due)"),
