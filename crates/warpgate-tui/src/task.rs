@@ -1,4 +1,7 @@
-use chrono::{NaiveDate, Utc};
+use chrono::{Local, NaiveDate, Utc};
+use warpgate_core::{Reminder, ReminderInput, reminder_at};
+
+use crate::db::parse_tw_date;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,9 +31,20 @@ pub struct Task {
     pub wait: Option<String>,
     pub until: Option<String>,
     pub parent: Option<String>,
+    pub remind: Option<String>,
 }
 
 impl Task {
+    pub fn reminder(&self) -> Option<Reminder> {
+        let input = ReminderInput {
+            status: self.status.as_deref().unwrap_or("pending"),
+            remind: self.remind.as_deref().and_then(parse_tw_date),
+            due: self.due.as_deref().and_then(parse_tw_date),
+            wait: self.wait.as_deref().and_then(parse_tw_date),
+        };
+        reminder_at(&input, &Local)
+    }
+
     pub fn is_started(&self) -> bool {
         self.start.is_some()
     }

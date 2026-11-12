@@ -1,0 +1,10 @@
+[package]
+name = "warpgate-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+
+[dev-dependencies]
+chrono-tz = "0.10.4"

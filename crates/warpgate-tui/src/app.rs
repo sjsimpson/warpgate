@@ -17,6 +17,13 @@ fn format_tw_date(raw: &Option<String>) -> String {
     }
 }
 
+fn format_tw_datetime(raw: &Option<String>) -> String {
+    raw.as_deref()
+        .and_then(db::parse_tw_date)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%dT%H:%M").to_string())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectSummary {
     pub name: String,
@@ -128,6 +135,7 @@ const FORM_FIELDS: &[FormField] = &[
     FormField::Until,
     FormField::Wait,
     FormField::Scheduled,
+    FormField::Remind,
     FormField::Depends,
 ];
 
@@ -142,6 +150,7 @@ pub enum FormField {
     Until,
     Wait,
     Scheduled,
+    Remind,
     Depends,
 }
 
@@ -157,6 +166,7 @@ impl FormField {
             Self::Until => "Until",
             Self::Wait => "Wait",
             Self::Scheduled => "Scheduled",
+            Self::Remind => "Remind",
             Self::Depends => "Depends (task IDs)",
         }
     }
@@ -370,6 +380,17 @@ impl FormField {
                 "  Scheduled: visible but not actionable\n",
                 "  Due:       deadline for completion\n",
             ),
+            Self::Remind => concat!(
+                "When to send a notification for this task.\n",
+                "\n",
+                "Accepts same date formats as Due, plus times:\n",
+                "  2026-06-01T09:30\n",
+                "  tomorrow+10h      tomorrow at 10:00\n",
+                "  now+2h\n",
+                "\n",
+                "Empty: notify at Due. A due date with no\n",
+                "time notifies at 9:00 that day.\n",
+            ),
             Self::Depends => concat!(
                 "Other tasks that must finish before this\n",
                 "one can start.\n",
@@ -416,6 +437,8 @@ pub struct TaskForm {
     pub until: String,
     pub wait: String,
     pub scheduled: String,
+    pub remind: String,
+    original_remind: String,
     pub depends: String,
     pub active_field: FormField,
     pub editing_uuid: Option<String>,
@@ -438,6 +461,8 @@ impl TaskForm {
             until: String::new(),
             wait: String::new(),
             scheduled: String::new(),
+            remind: String::new(),
+            original_remind: String::new(),
             depends: String::new(),
             active_field: FormField::Description,
             editing_uuid: None,
@@ -459,6 +484,8 @@ impl TaskForm {
             until: format_tw_date(&task.until),
             wait: format_tw_date(&task.wait),
             scheduled: format_tw_date(&task.scheduled),
+            remind: format_tw_datetime(&task.remind),
+            original_remind: format_tw_datetime(&task.remind),
             depends: task.depends.clone().unwrap_or_default(),
             active_field: FormField::Description,
             editing_uuid: task.uuid.clone(),
@@ -571,6 +598,7 @@ impl TaskForm {
             FormField::Until => &self.until,
             FormField::Wait => &self.wait,
             FormField::Scheduled => &self.scheduled,
+            FormField::Remind => &self.remind,
             FormField::Depends => &self.depends,
         }
     }
@@ -586,6 +614,7 @@ impl TaskForm {
             FormField::Until => &mut self.until,
             FormField::Wait => &mut self.wait,
             FormField::Scheduled => &mut self.scheduled,
+            FormField::Remind => &mut self.remind,
             FormField::Depends => &mut self.depends,
         }
     }
@@ -1130,6 +1159,9 @@ impl App {
                 mods.push(format!("project:{}", form.project));
                 mods.push(format!("priority:{}", form.priority));
                 mods.push(format!("due:{}", form.due));
+                if form.remind != form.original_remind {
+                    mods.push(format!("remind:{}", form.remind));
+                }
                 if !form.recur.is_empty() {
                     mods.push(format!("recur:{}", form.recur));
                 }
@@ -1148,10 +1180,13 @@ impl App {
                 for tag in &tags {
                     mods.push(format!("+{}", tag));
                 }
-                let _ = taskwarrior::modify_task(uuid, &mods);
+                if let Err(e) = taskwarrior::modify_task(uuid, &mods) {
+                    self.status_msg = format!("Not saved: {e}");
+                    return;
+                }
                 self.status_msg = format!("Modified: {}", form.description);
             } else {
-                let _ = taskwarrior::add_task_full(
+                let added = taskwarrior::add_task_full(
                     &form.description,
                     &form.project,
                     &form.priority,
@@ -1161,8 +1196,13 @@ impl App {
                     &form.until,
                     &form.wait,
                     &form.scheduled,
+                    &form.remind,
                     &form.depends,
                 );
+                if let Err(e) = added {
+                    self.status_msg = format!("Not saved: {e}");
+                    return;
+                }
                 self.status_msg = format!("Added: {}", form.description);
             }
             self.refresh();

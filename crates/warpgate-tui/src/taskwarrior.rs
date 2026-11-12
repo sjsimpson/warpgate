@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::process::Command;
 
-use color_eyre::Result;
+use color_eyre::{Result, eyre::eyre};
 
 use crate::task::Task;
 
@@ -73,7 +73,7 @@ fn push_attr(args: &mut Vec<String>, key: &str, val: &str) {
 
 pub fn add_task_full(
     desc: &str, project: &str, priority: &str, due: &str, tags: &[String],
-    recur: &str, until: &str, wait: &str, scheduled: &str, depends: &str,
+    recur: &str, until: &str, wait: &str, scheduled: &str, remind: &str, depends: &str,
 ) -> Result<()> {
     let mut args = vec!["add".to_string(), desc.to_string()];
     push_attr(&mut args, "project", project);
@@ -83,23 +83,30 @@ pub fn add_task_full(
     push_attr(&mut args, "until", until);
     push_attr(&mut args, "wait", wait);
     push_attr(&mut args, "scheduled", scheduled);
+    push_attr(&mut args, "remind", remind);
     push_attr(&mut args, "depends", depends);
     for tag in tags {
         if !tag.is_empty() {
             args.push(format!("+{}", tag));
         }
     }
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    Command::new("task").args(&arg_refs).output()?;
-    Ok(())
+    run_checked(&args)
 }
 
 pub fn modify_task(uuid: &str, mods: &[String]) -> Result<()> {
     let mut args = vec!["rc.confirmation=off".to_string(), uuid.to_string(), "modify".to_string()];
     args.extend(mods.iter().cloned());
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    Command::new("task").args(&arg_refs).output()?;
-    Ok(())
+    run_checked(&args)
+}
+
+fn run_checked(args: &[String]) -> Result<()> {
+    let output = Command::new("task").args(args).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("task failed");
+    Err(eyre!("{}", reason.trim()))
 }
 
 pub fn annotate_task(uuid: &str, text: &str) -> Result<()> {

@@ -1,0 +1,18 @@
+[package]
+name = "warpgate-tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "warpgate"
+path = "src/main.rs"
+
+[dependencies]
+warpgate-core = { path = "../warpgate-core" }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+color-eyre = "0.6"
+chrono.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }

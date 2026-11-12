@@ -9,6 +9,9 @@ use ratatui::{
     },
 };
 
+use chrono::Local;
+use warpgate_core::ReminderSource;
+
 use crate::app::{App, InputMode, Pane};
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -529,6 +532,18 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(vec![
                     Span::styled("Scheduled    ", label),
                     Span::styled(format_date(scheduled), val),
+                ]));
+            }
+
+            if let Some(reminder) = t.reminder() {
+                let at = reminder.at.with_timezone(&Local).format("%Y-%m-%d %H:%M");
+                let text = match reminder.source {
+                    ReminderSource::Remind => at.to_string(),
+                    ReminderSource::Due => format!("{at} (from due)"),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("Remind       ", label),
+                    Span::styled(text, val),
                 ]));
             }
 
@@ -1061,16 +1076,8 @@ fn centered_rect_abs(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn format_date(raw: &str) -> String {
-    if raw.len() >= 15 {
-        format!(
-            "{}-{}-{} {}:{}",
-            &raw[0..4],
-            &raw[4..6],
-            &raw[6..8],
-            &raw[9..11],
-            &raw[11..13],
-        )
-    } else {
-        raw.to_string()
+    match crate::db::parse_tw_date(raw) {
+        Some(dt) => dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string(),
+        None => raw.to_string(),
     }
 }
