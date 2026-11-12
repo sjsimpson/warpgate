@@ -87,6 +87,7 @@ fn parse_task(uuid: &str, data: &str) -> Option<Task> {
         wait: get_epoch("wait"),
         until: get_epoch("until"),
         parent: get_str("parent"),
+        remind: get_epoch("remind"),
     })
 }
 

@@ -9,6 +9,8 @@ use ratatui::{
     },
 };
 
+use warpgate_core::ReminderSource;
+
 use crate::app::{App, InputMode, Pane};
 
 pub fn draw(f: &mut Frame, app: &App) {
@@ -529,6 +531,18 @@ fn draw_detail(f: &mut Frame, app: &App, area: Rect) {
                 lines.push(Line::from(vec![
                     Span::styled("Scheduled    ", label),
                     Span::styled(format_date(scheduled), val),
+                ]));
+            }
+
+            if let Some(reminder) = t.reminder() {
+                let at = reminder.at.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M");
+                let text = match reminder.source {
+                    ReminderSource::Remind => at.to_string(),
+                    ReminderSource::Due => format!("{at} (from due)"),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("Remind       ", label),
+                    Span::styled(text, val),
                 ]));
             }
 

@@ -1,4 +1,5 @@
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, Utc};
+use warpgate_core::{DEFAULT_MORNING, Reminder, ReminderInput, reminder_at};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,9 +29,34 @@ pub struct Task {
     pub wait: Option<String>,
     pub until: Option<String>,
     pub parent: Option<String>,
+    pub remind: Option<String>,
+}
+
+fn parse_tw_date(raw: &str) -> Option<DateTime<Utc>> {
+    NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%SZ")
+        .ok()
+        .map(|dt| dt.and_utc())
 }
 
 impl Task {
+    pub fn reminder(&self) -> Option<Reminder> {
+        let input = ReminderInput {
+            status: self.status.as_deref().unwrap_or("pending"),
+            remind: self.remind.as_deref().and_then(parse_tw_date),
+            due: self.due.as_deref().and_then(parse_tw_date),
+            wait: self.wait.as_deref().and_then(parse_tw_date),
+        };
+        reminder_at(&input, &Local, DEFAULT_MORNING)
+    }
+
+    pub fn remind_local(&self) -> String {
+        self.remind
+            .as_deref()
+            .and_then(parse_tw_date)
+            .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%dT%H:%M").to_string())
+            .unwrap_or_default()
+    }
+
     pub fn is_started(&self) -> bool {
         self.start.is_some()
     }

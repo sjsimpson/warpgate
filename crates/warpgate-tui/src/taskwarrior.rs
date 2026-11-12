@@ -73,7 +73,7 @@ fn push_attr(args: &mut Vec<String>, key: &str, val: &str) {
 
 pub fn add_task_full(
     desc: &str, project: &str, priority: &str, due: &str, tags: &[String],
-    recur: &str, until: &str, wait: &str, scheduled: &str, depends: &str,
+    recur: &str, until: &str, wait: &str, scheduled: &str, remind: &str, depends: &str,
 ) -> Result<()> {
     let mut args = vec!["add".to_string(), desc.to_string()];
     push_attr(&mut args, "project", project);
@@ -83,6 +83,7 @@ pub fn add_task_full(
     push_attr(&mut args, "until", until);
     push_attr(&mut args, "wait", wait);
     push_attr(&mut args, "scheduled", scheduled);
+    push_attr(&mut args, "remind", remind);
     push_attr(&mut args, "depends", depends);
     for tag in tags {
         if !tag.is_empty() {
