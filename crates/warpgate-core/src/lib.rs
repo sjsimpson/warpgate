@@ -129,6 +129,28 @@ mod tests {
     }
 
     #[test]
+    fn wait_ending_exactly_at_the_reminder_keeps_it() {
+        let task = ReminderInput {
+            remind: Some(utc("2026-11-12T15:00:00Z")),
+            wait: Some(utc("2026-11-12T15:00:00Z")),
+            ..input("waiting")
+        };
+        assert_eq!(at(&task).unwrap().at, utc("2026-11-12T15:00:00Z"));
+    }
+
+    #[test]
+    fn date_only_due_on_dst_days_pings_at_local_morning() {
+        let tz = chrono_tz::America::New_York;
+        for (due, expected) in [
+            ("2026-03-08T05:00:00Z", "2026-03-08T13:00:00Z"),
+            ("2026-11-01T04:00:00Z", "2026-11-01T14:00:00Z"),
+        ] {
+            let task = ReminderInput { due: Some(utc(due)), ..input("pending") };
+            assert_eq!(reminder_at(&task, &tz).unwrap().at, utc(expected), "{due}");
+        }
+    }
+
+    #[test]
     fn wait_ending_before_the_reminder_keeps_it() {
         let task = ReminderInput {
             remind: Some(utc("2026-11-12T15:00:00Z")),

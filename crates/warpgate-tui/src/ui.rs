@@ -1076,16 +1076,8 @@ fn centered_rect_abs(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn format_date(raw: &str) -> String {
-    if raw.len() >= 15 {
-        format!(
-            "{}-{}-{} {}:{}",
-            &raw[0..4],
-            &raw[4..6],
-            &raw[6..8],
-            &raw[9..11],
-            &raw[11..13],
-        )
-    } else {
-        raw.to_string()
+    match crate::db::parse_tw_date(raw) {
+        Some(dt) => dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string(),
+        None => raw.to_string(),
     }
 }

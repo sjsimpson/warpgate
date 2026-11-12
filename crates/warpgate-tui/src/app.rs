@@ -438,6 +438,7 @@ pub struct TaskForm {
     pub wait: String,
     pub scheduled: String,
     pub remind: String,
+    original_remind: String,
     pub depends: String,
     pub active_field: FormField,
     pub editing_uuid: Option<String>,
@@ -461,6 +462,7 @@ impl TaskForm {
             wait: String::new(),
             scheduled: String::new(),
             remind: String::new(),
+            original_remind: String::new(),
             depends: String::new(),
             active_field: FormField::Description,
             editing_uuid: None,
@@ -483,6 +485,7 @@ impl TaskForm {
             wait: format_tw_date(&task.wait),
             scheduled: format_tw_date(&task.scheduled),
             remind: format_tw_datetime(&task.remind),
+            original_remind: format_tw_datetime(&task.remind),
             depends: task.depends.clone().unwrap_or_default(),
             active_field: FormField::Description,
             editing_uuid: task.uuid.clone(),
@@ -1156,7 +1159,9 @@ impl App {
                 mods.push(format!("project:{}", form.project));
                 mods.push(format!("priority:{}", form.priority));
                 mods.push(format!("due:{}", form.due));
-                mods.push(format!("remind:{}", form.remind));
+                if form.remind != form.original_remind {
+                    mods.push(format!("remind:{}", form.remind));
+                }
                 if !form.recur.is_empty() {
                     mods.push(format!("recur:{}", form.recur));
                 }
@@ -1175,10 +1180,13 @@ impl App {
                 for tag in &tags {
                     mods.push(format!("+{}", tag));
                 }
-                let _ = taskwarrior::modify_task(uuid, &mods);
+                if let Err(e) = taskwarrior::modify_task(uuid, &mods) {
+                    self.status_msg = format!("Not saved: {e}");
+                    return;
+                }
                 self.status_msg = format!("Modified: {}", form.description);
             } else {
-                let _ = taskwarrior::add_task_full(
+                let added = taskwarrior::add_task_full(
                     &form.description,
                     &form.project,
                     &form.priority,
@@ -1191,6 +1199,10 @@ impl App {
                     &form.remind,
                     &form.depends,
                 );
+                if let Err(e) = added {
+                    self.status_msg = format!("Not saved: {e}");
+                    return;
+                }
                 self.status_msg = format!("Added: {}", form.description);
             }
             self.refresh();

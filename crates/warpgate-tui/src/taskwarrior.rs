@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::process::Command;
 
-use color_eyre::Result;
+use color_eyre::{Result, eyre::eyre};
 
 use crate::task::Task;
 
@@ -90,17 +90,23 @@ pub fn add_task_full(
             args.push(format!("+{}", tag));
         }
     }
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    Command::new("task").args(&arg_refs).output()?;
-    Ok(())
+    run_checked(&args)
 }
 
 pub fn modify_task(uuid: &str, mods: &[String]) -> Result<()> {
     let mut args = vec!["rc.confirmation=off".to_string(), uuid.to_string(), "modify".to_string()];
     args.extend(mods.iter().cloned());
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    Command::new("task").args(&arg_refs).output()?;
-    Ok(())
+    run_checked(&args)
+}
+
+fn run_checked(args: &[String]) -> Result<()> {
+    let output = Command::new("task").args(args).output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let reason = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("task failed");
+    Err(eyre!("{}", reason.trim()))
 }
 
 pub fn annotate_task(uuid: &str, text: &str) -> Result<()> {
