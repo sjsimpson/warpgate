@@ -1,10 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, TimeDelta, Utc};
+use chrono::{DateTime, Local, NaiveDate, TimeDelta, Utc};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -52,7 +52,14 @@ impl Act {
 struct State {
     data_dir: PathBuf,
     last_check: Mutex<DateTime<Utc>>,
-    shown_menu: Mutex<Vec<String>>,
+    shown_menu: Mutex<Option<MenuModel>>,
+}
+
+#[derive(PartialEq)]
+struct MenuModel {
+    header: String,
+    tasks: Vec<(Uuid, String)>,
+    autostart: bool,
 }
 
 fn main() {
@@ -64,7 +71,7 @@ fn main() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             app.manage(State {
-                data_dir: data_dir(),
+                data_dir: data_dir(app)?,
                 last_check: Mutex::new(Utc::now()),
                 shown_menu: Mutex::default(),
             });
@@ -107,32 +114,31 @@ fn main() {
 }
 
 /// `TASKDATA`, else Taskwarrior's default `~/.task`.
-fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("TASKDATA") {
-        return PathBuf::from(dir);
+fn data_dir(app: &tauri::App) -> tauri::Result<PathBuf> {
+    match std::env::var_os("TASKDATA") {
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(app.path().home_dir()?.join(".task")),
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
-    PathBuf::from(home).join(".task")
 }
 
 async fn refresh(app: &AppHandle) {
     let state = app.state::<State>();
+    let now = Utc::now();
     let upcoming = match load_upcoming(&state.data_dir).await {
         Ok(upcoming) => upcoming,
         Err(e) => {
-            show_menu(app, &[], Some(&format!("Can't read tasks: {e}")));
+            show_menu(app, now, &[], Some(format!("Can't read tasks: {e}")));
             return;
         }
     };
-    let now = Utc::now();
     let since = std::mem::replace(&mut *state.last_check.lock().unwrap(), now);
     for task in upcoming.iter().filter(|u| u.reminder.at > since && u.reminder.at <= now) {
         notify(app, task);
     }
-    show_menu(app, &upcoming, None);
+    show_menu(app, now, &upcoming, None);
 }
 
-async fn load_upcoming(dir: &PathBuf) -> Result<Vec<Upcoming>, warpgate_core::Error> {
+async fn load_upcoming(dir: &Path) -> Result<Vec<Upcoming>, warpgate_core::Error> {
     Store::open(dir).await?.upcoming(&Local).await
 }
 
@@ -147,70 +153,65 @@ fn notify(app: &AppHandle, task: &Upcoming) {
         .show();
 }
 
-fn show_menu(app: &AppHandle, upcoming: &[Upcoming], error: Option<&str>) {
+fn show_menu(app: &AppHandle, now: DateTime<Utc>, upcoming: &[Upcoming], error: Option<String>) {
     let Some(tray) = app.tray_by_id(TRAY) else { return };
-    let now = Utc::now();
-    let end_of_today = Local::now().date_naive().and_hms_opt(23, 59, 59).unwrap();
-    let shown: Vec<&Upcoming> = upcoming
+    let today = now.with_timezone(&Local).date_naive();
+    let tasks: Vec<(Uuid, String)> = upcoming
         .iter()
-        .filter(|u| u.reminder.at.with_timezone(&Local).naive_local() <= end_of_today)
+        .filter(|u| u.reminder.at.with_timezone(&Local).date_naive() <= today)
         .take(MENU_TASKS)
+        .map(|u| (u.uuid, task_label(u, today)))
         .collect();
-    let due_now = upcoming.iter().filter(|u| u.reminder.at <= now).count();
+    let header = error.unwrap_or_else(|| {
+        if tasks.is_empty() { "Nothing due today" } else { "Due today" }.to_string()
+    });
+    let model = MenuModel { header, tasks, autostart: app.autolaunch().is_enabled().unwrap_or(false) };
 
     // Replacing the menu closes it if it's open, so only swap it when its contents change.
-    let autostart = app.autolaunch().is_enabled().unwrap_or(false);
-    let contents: Vec<String> = [error.unwrap_or_default().to_string(), autostart.to_string()]
-        .into_iter()
-        .chain(shown.iter().map(|task| format!("{} {}", task.uuid, task_label(task))))
-        .collect();
     let state = app.state::<State>();
     let mut shown_menu = state.shown_menu.lock().unwrap();
-    if *shown_menu != contents {
-        let Ok(menu) = build_menu(app, &shown, error, autostart) else { return };
+    if shown_menu.as_ref() != Some(&model) {
+        let Ok(menu) = build_menu(app, &model) else { return };
         let _ = tray.set_menu(Some(menu));
-        *shown_menu = contents;
+        *shown_menu = Some(model);
     }
+
+    let due_now = upcoming.iter().filter(|u| u.reminder.at <= now).count();
     #[cfg(target_os = "macos")]
     let _ = tray.set_title((due_now > 0).then(|| due_now.to_string()));
     let _ = tray.set_tooltip(Some(format!("warpgate: {due_now} due")));
 }
 
-fn build_menu(
-    app: &AppHandle,
-    shown: &[&Upcoming],
-    error: Option<&str>,
-    autostart: bool,
-) -> tauri::Result<Menu<tauri::Wry>> {
-    let header = match (error, shown.is_empty()) {
-        (Some(error), _) => error.to_string(),
-        (None, true) => "Nothing due today".to_string(),
-        (None, false) => "Due today".to_string(),
-    };
+fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::Wry>> {
     let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> =
-        vec![Box::new(MenuItem::new(app, header, false, None::<&str>)?)];
-    for task in shown {
+        vec![Box::new(MenuItem::new(app, &model.header, false, None::<&str>)?)];
+    for (uuid, label) in &model.tasks {
         let actions = Act::ALL
-            .map(|act| MenuItem::with_id(app, format!("{}:{}", act.id(), task.uuid), act.title(), true, None::<&str>));
-        let [done, snooze, tomorrow] = actions;
-        items.push(Box::new(Submenu::with_items(
-            app,
-            task_label(task),
-            true,
-            &[&done?, &snooze?, &tomorrow?],
-        )?));
+            .into_iter()
+            .map(|act| MenuItem::with_id(app, format!("{}:{uuid}", act.id()), act.title(), true, None::<&str>))
+            .collect::<tauri::Result<Vec<_>>>()?;
+        let actions: Vec<&dyn IsMenuItem<tauri::Wry>> =
+            actions.iter().map(|item| item as &dyn IsMenuItem<tauri::Wry>).collect();
+        items.push(Box::new(Submenu::with_items(app, label, true, &actions)?));
     }
     items.push(Box::new(PredefinedMenuItem::separator(app)?));
-    items.push(Box::new(CheckMenuItem::with_id(app, "autostart", "Start at login", true, autostart, None::<&str>)?));
+    items.push(Box::new(CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "Start at login",
+        true,
+        model.autostart,
+        None::<&str>,
+    )?));
     items.push(Box::new(MenuItem::with_id(app, "quit", "Quit warpgate", true, None::<&str>)?));
 
-    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|item| item.as_ref()).collect();
-    Menu::with_items(app, &refs)
+    let items: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|item| item.as_ref()).collect();
+    Menu::with_items(app, &items)
 }
 
-fn task_label(task: &Upcoming) -> String {
+fn task_label(task: &Upcoming, today: NaiveDate) -> String {
     let at = task.reminder.at.with_timezone(&Local);
-    let when = if at.date_naive() == Local::now().date_naive() {
+    let when = if at.date_naive() == today {
         at.format("%H:%M").to_string()
     } else {
         at.format("%a %-m/%-d").to_string()
@@ -259,7 +260,7 @@ fn spawn_act(app: &AppHandle, act: Act, uuid: Uuid) {
     });
 }
 
-async fn apply(dir: &PathBuf, act: Act, uuid: Uuid) -> Result<(), warpgate_core::Error> {
+async fn apply(dir: &Path, act: Act, uuid: Uuid) -> Result<(), warpgate_core::Error> {
     let mut store = Store::open(dir).await?;
     let now = Utc::now();
     match act {

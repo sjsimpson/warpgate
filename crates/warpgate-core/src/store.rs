@@ -2,7 +2,7 @@ use std::path::Path;
 
 use chrono::{DateTime, TimeZone, Utc};
 use taskchampion::storage::AccessMode;
-use taskchampion::{Operation, Replica, SqliteStorage};
+use taskchampion::{Operation, Replica, SqliteStorage, TaskData, utc_timestamp};
 
 pub use taskchampion::{Error, Uuid};
 
@@ -29,23 +29,26 @@ impl Store {
 
     /// Working-set tasks still pending that have a reminder, soonest first.
     pub async fn upcoming<Tz: TimeZone>(&mut self, tz: &Tz) -> Result<Vec<Upcoming>, Error> {
+        let timestamp = |task: &TaskData, property: &str| {
+            task.get(property).and_then(|secs| secs.parse().ok()).map(utc_timestamp)
+        };
         let mut upcoming: Vec<Upcoming> = self
             .replica
-            .pending_tasks()
+            .pending_task_data()
             .await?
             .into_iter()
             .filter_map(|task| {
                 let input = ReminderInput {
-                    status: task.get_value("status").unwrap_or_default(),
-                    remind: task.get_timestamp("remind"),
-                    due: task.get_due(),
-                    wait: task.get_wait(),
+                    status: task.get("status").unwrap_or_default(),
+                    remind: timestamp(&task, "remind"),
+                    due: timestamp(&task, "due"),
+                    wait: timestamp(&task, "wait"),
                 };
                 Some(Upcoming {
                     reminder: reminder_at(&input, tz)?,
                     uuid: task.get_uuid(),
-                    description: task.get_description().to_owned(),
-                    project: task.get_value("project").map(str::to_owned),
+                    description: task.get("description").unwrap_or_default().to_owned(),
+                    project: task.get("project").map(str::to_owned),
                 })
             })
             .collect();
