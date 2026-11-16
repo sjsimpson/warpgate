@@ -8,6 +8,8 @@ use chrono::{DateTime, Local, NaiveDate, TimeDelta, Utc};
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
+#[cfg(target_os = "macos")]
+use tauri::tray::TrayIconEvent;
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_notification::{Action, ActionPerformed, ActionType, NotificationExt};
@@ -62,6 +64,8 @@ struct MenuModel {
     header: String,
     tasks: Vec<(Uuid, String)>,
     autostart: bool,
+    due_now: usize,
+    tooltip: String,
 }
 
 fn main() {
@@ -69,9 +73,6 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
             app.manage(State {
                 data_dir: data_dir(app)?,
                 last_check: Mutex::new(Utc::now()),
@@ -89,12 +90,20 @@ fn main() {
             let handle = app.handle().clone();
             notifications.on_action(move |performed| on_notification_action(&handle, performed))?;
 
-            TrayIconBuilder::with_id(TRAY)
+            let tray = TrayIconBuilder::with_id(TRAY)
                 .icon(Image::from_bytes(include_bytes!("../icons/tray.png"))?)
                 .icon_as_template(true)
                 .show_menu_on_left_click(true)
-                .on_menu_event(on_menu_event)
-                .build(app)?;
+                .on_menu_event(on_menu_event);
+            // An inactive app's tray menu closes the first time a submenu is hovered,
+            // so activate the app as soon as its icon is clicked.
+            #[cfg(target_os = "macos")]
+            let tray = tray.on_tray_icon_event(|tray, event| {
+                if let TrayIconEvent::Click { .. } = event {
+                    let _ = tray.app_handle().show();
+                }
+            });
+            tray.build(app)?;
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -182,20 +191,26 @@ fn show_menu(app: &AppHandle, now: DateTime<Utc>, upcoming: &[Upcoming], error: 
     let header = error.unwrap_or_else(|| {
         if tasks.is_empty() { "Nothing due today" } else { "Due today" }.to_string()
     });
-    let model = MenuModel { header, tasks, autostart: app.autolaunch().is_enabled().unwrap_or(false) };
+    let model = MenuModel {
+        header,
+        tasks,
+        autostart: app.autolaunch().is_enabled().unwrap_or(false),
+        due_now,
+        tooltip,
+    };
 
-    // Replacing the menu closes it if it's open, so only swap it when its contents change.
+    // Replacing the menu closes it if it's open, so only touch the tray when something changed.
     let state = app.state::<State>();
     let mut shown_menu = state.shown_menu.lock().unwrap();
-    if shown_menu.as_ref() != Some(&model) {
-        let Ok(menu) = build_menu(app, &model) else { return };
-        let _ = tray.set_menu(Some(menu));
-        *shown_menu = Some(model);
+    if shown_menu.as_ref() == Some(&model) {
+        return;
     }
-
+    let Ok(menu) = build_menu(app, &model) else { return };
+    let _ = tray.set_menu(Some(menu));
     #[cfg(target_os = "macos")]
-    let _ = tray.set_title((due_now > 0).then(|| due_now.to_string()));
-    let _ = tray.set_tooltip(Some(tooltip));
+    let _ = tray.set_title((model.due_now > 0).then(|| model.due_now.to_string()));
+    let _ = tray.set_tooltip(Some(&model.tooltip));
+    *shown_menu = Some(model);
 }
 
 fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::Wry>> {
