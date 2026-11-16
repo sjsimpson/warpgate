@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Days, NaiveDate, NaiveTime, TimeZone, Utc};
 
 mod store;
 pub use store::{Error, Store, Upcoming, Uuid};
@@ -47,10 +47,19 @@ fn due_reminder<Tz: TimeZone>(due: DateTime<Utc>, tz: &Tz) -> DateTime<Utc> {
     if local.time() != NaiveTime::MIN && local.time() != END_OF_DAY {
         return due;
     }
-    tz.from_local_datetime(&local.date().and_time(MORNING))
+    morning_on(local.date(), tz).unwrap_or(due)
+}
+
+/// The "Tomorrow" snooze: 9:00 local on the day after `now`.
+pub fn tomorrow_morning<Tz: TimeZone>(now: DateTime<Utc>, tz: &Tz) -> DateTime<Utc> {
+    let tomorrow = now.with_timezone(tz).date_naive() + Days::new(1);
+    morning_on(tomorrow, tz).unwrap_or(now + Days::new(1))
+}
+
+fn morning_on<Tz: TimeZone>(date: NaiveDate, tz: &Tz) -> Option<DateTime<Utc>> {
+    tz.from_local_datetime(&date.and_time(MORNING))
         .earliest()
         .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or(due)
 }
 
 #[cfg(test)]
@@ -161,5 +170,17 @@ mod tests {
             ..input("waiting")
         };
         assert_eq!(at(&task).unwrap().at, utc("2026-11-12T15:00:00Z"));
+    }
+
+    #[test]
+    fn tomorrow_morning_is_nine_local_the_next_day() {
+        assert_eq!(
+            tomorrow_morning(utc("2026-11-13T05:30:00Z"), &mountain()),
+            utc("2026-11-13T16:00:00Z")
+        );
+        assert_eq!(
+            tomorrow_morning(utc("2026-11-12T20:00:00Z"), &mountain()),
+            utc("2026-11-13T16:00:00Z")
+        );
     }
 }
