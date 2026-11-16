@@ -26,7 +26,9 @@ enum Act {
 }
 
 impl Act {
-    const ALL: [Act; 3] = [Act::Done, Act::SnoozeHour, Act::Tomorrow];
+    // macOS runs the first action when the notification's "Options" button itself is
+    // clicked, so the first one must be harmless.
+    const ALL: [Act; 3] = [Act::SnoozeHour, Act::Tomorrow, Act::Done];
 
     fn id(self) -> &'static str {
         match self {
@@ -131,8 +133,13 @@ async fn refresh(app: &AppHandle) {
             return;
         }
     };
-    let since = std::mem::replace(&mut *state.last_check.lock().unwrap(), now);
-    for task in upcoming.iter().filter(|u| u.reminder.at > since && u.reminder.at <= now) {
+    let since = {
+        let mut last_check = state.last_check.lock().unwrap();
+        let since = *last_check;
+        *last_check = since.max(now);
+        since
+    };
+    for task in due_between(&upcoming, since, now) {
         notify(app, task);
     }
     show_menu(app, now, &upcoming, None);
@@ -140,6 +147,11 @@ async fn refresh(app: &AppHandle) {
 
 async fn load_upcoming(dir: &Path) -> Result<Vec<Upcoming>, warpgate_core::Error> {
     Store::open(dir).await?.upcoming(&Local).await
+}
+
+/// Reminders that came due after the last check, up to and including `now`.
+fn due_between(upcoming: &[Upcoming], since: DateTime<Utc>, now: DateTime<Utc>) -> impl Iterator<Item = &Upcoming> {
+    upcoming.iter().filter(move |u| u.reminder.at > since && u.reminder.at <= now)
 }
 
 fn notify(app: &AppHandle, task: &Upcoming) {
@@ -155,6 +167,11 @@ fn notify(app: &AppHandle, task: &Upcoming) {
 
 fn show_menu(app: &AppHandle, now: DateTime<Utc>, upcoming: &[Upcoming], error: Option<String>) {
     let Some(tray) = app.tray_by_id(TRAY) else { return };
+    let due_now = upcoming.iter().filter(|u| u.reminder.at <= now).count();
+    let tooltip = match &error {
+        Some(error) => format!("warpgate: {error}"),
+        None => format!("warpgate: {due_now} due"),
+    };
     let today = now.with_timezone(&Local).date_naive();
     let tasks: Vec<(Uuid, String)> = upcoming
         .iter()
@@ -176,10 +193,9 @@ fn show_menu(app: &AppHandle, now: DateTime<Utc>, upcoming: &[Upcoming], error: 
         *shown_menu = Some(model);
     }
 
-    let due_now = upcoming.iter().filter(|u| u.reminder.at <= now).count();
     #[cfg(target_os = "macos")]
     let _ = tray.set_title((due_now > 0).then(|| due_now.to_string()));
-    let _ = tray.set_tooltip(Some(format!("warpgate: {due_now} due")));
+    let _ = tray.set_tooltip(Some(tooltip));
 }
 
 fn build_menu(app: &AppHandle, model: &MenuModel) -> tauri::Result<Menu<tauri::Wry>> {
@@ -227,6 +243,10 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         "autostart" => {
             let autolaunch = app.autolaunch();
             let _ = if autolaunch.is_enabled().unwrap_or(false) { autolaunch.disable() } else { autolaunch.enable() };
+            // The check mark flips on click even if the toggle failed; rebuild from the real state.
+            *app.state::<State>().shown_menu.lock().unwrap() = None;
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { refresh(&app).await });
         }
         id => {
             let Some((act, uuid)) = id.split_once(':') else { return };
@@ -267,5 +287,52 @@ async fn apply(dir: &Path, act: Act, uuid: Uuid) -> Result<(), warpgate_core::Er
         Act::Done => store.done(uuid).await,
         Act::SnoozeHour => store.snooze(uuid, now + TimeDelta::hours(1)).await,
         Act::Tomorrow => store.snooze(uuid, tomorrow_morning(now, &Local)).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use warpgate_core::{Reminder, ReminderSource};
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn upcoming(at: &str) -> Upcoming {
+        Upcoming {
+            uuid: Uuid::new_v4(),
+            description: at.to_string(),
+            project: None,
+            reminder: Reminder { at: utc(at), source: ReminderSource::Remind },
+        }
+    }
+
+    #[test]
+    fn due_between_excludes_since_and_includes_now() {
+        let tasks = [
+            upcoming("2026-11-16T10:00:00Z"),
+            upcoming("2026-11-16T10:00:10Z"),
+            upcoming("2026-11-16T10:00:30Z"),
+            upcoming("2026-11-16T10:00:31Z"),
+        ];
+
+        let due: Vec<_> = due_between(&tasks, utc("2026-11-16T10:00:00Z"), utc("2026-11-16T10:00:30Z"))
+            .map(|u| u.description.as_str())
+            .collect();
+
+        assert_eq!(due, ["2026-11-16T10:00:10Z", "2026-11-16T10:00:30Z"]);
+    }
+
+    #[test]
+    fn back_to_back_windows_notify_each_reminder_once() {
+        let tasks = [upcoming("2026-11-16T10:00:30Z")];
+        let first = utc("2026-11-16T10:00:00Z");
+        let second = utc("2026-11-16T10:00:30Z");
+        let third = utc("2026-11-16T10:01:00Z");
+
+        let total = due_between(&tasks, first, second).count() + due_between(&tasks, second, third).count();
+
+        assert_eq!(total, 1);
     }
 }

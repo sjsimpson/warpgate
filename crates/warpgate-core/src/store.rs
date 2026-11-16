@@ -2,7 +2,7 @@ use std::path::Path;
 
 use chrono::{DateTime, TimeZone, Utc};
 use taskchampion::storage::AccessMode;
-use taskchampion::{Operation, Replica, SqliteStorage, TaskData, utc_timestamp};
+use taskchampion::{Operation, Replica, SqliteStorage, Status, TaskData, utc_timestamp};
 
 pub use taskchampion::{Error, Uuid};
 
@@ -56,15 +56,37 @@ impl Store {
         Ok(upcoming)
     }
 
+    /// Like `task done`: only for pending tasks, stops a started task, and marks the
+    /// instance done in its recurring template's `mask`.
     pub async fn done(&mut self, uuid: Uuid) -> Result<(), Error> {
         let mut task = self.replica.get_task(uuid).await?.ok_or_else(|| missing(uuid))?;
+        if task.get_status() != Status::Pending {
+            return Ok(());
+        }
         let mut ops = vec![Operation::UndoPoint];
+        if task.is_active() {
+            task.stop(&mut ops)?;
+        }
         task.done(&mut ops)?;
+
+        let parent = task.get_value("parent").and_then(|parent| Uuid::parse_str(parent).ok());
+        let index = task.get_value("imask").and_then(|index| index.parse::<usize>().ok());
+        if let (Some(parent), Some(index)) = (parent, index)
+            && let Some(mut template) = self.replica.get_task(parent).await?
+            && let Some(mask) = template.get_value("mask").filter(|mask| index < mask.len())
+        {
+            let mut mask = mask.to_owned();
+            mask.replace_range(index..=index, "+");
+            template.set_value("mask", Some(mask), &mut ops)?;
+        }
         self.replica.commit_operations(ops).await
     }
 
     pub async fn snooze(&mut self, uuid: Uuid, until: DateTime<Utc>) -> Result<(), Error> {
         let mut task = self.replica.get_task(uuid).await?.ok_or_else(|| missing(uuid))?;
+        if task.get_status() != Status::Pending {
+            return Ok(());
+        }
         let mut ops = vec![Operation::UndoPoint];
         task.set_timestamp("remind", Some(until), &mut ops)?;
         self.replica.commit_operations(ops).await
@@ -79,7 +101,6 @@ fn missing(uuid: Uuid) -> Error {
 mod tests {
     use super::*;
     use crate::ReminderSource;
-    use taskchampion::Status;
     use tempfile::TempDir;
 
     fn utc(s: &str) -> DateTime<Utc> {
@@ -156,5 +177,63 @@ mod tests {
         let mut store = Store::open(dir.path()).await.unwrap();
 
         assert!(store.done(Uuid::new_v4()).await.is_err());
+    }
+
+    async fn task_value(store: &mut Store, uuid: Uuid, property: &str) -> Option<String> {
+        let task = store.replica.get_task(uuid).await.unwrap().unwrap();
+        task.get_value(property).map(str::to_owned)
+    }
+
+    #[tokio::test]
+    async fn done_leaves_closed_tasks_alone() {
+        let dir = TempDir::new().unwrap();
+        let uuids = seed(dir.path(), &[("gone", Some("2026-11-20T15:00:00Z"), None)]).await;
+        let mut store = Store::open(dir.path()).await.unwrap();
+        let mut ops = Vec::new();
+        let mut task = store.replica.get_task(uuids[0]).await.unwrap().unwrap();
+        task.set_status(Status::Deleted, &mut ops).unwrap();
+        store.replica.commit_operations(ops).await.unwrap();
+
+        store.done(uuids[0]).await.unwrap();
+        store.snooze(uuids[0], utc("2026-11-21T15:00:00Z")).await.unwrap();
+
+        assert_eq!(task_value(&mut store, uuids[0], "status").await.as_deref(), Some("deleted"));
+        assert_eq!(task_value(&mut store, uuids[0], "remind").await, Some(utc("2026-11-20T15:00:00Z").timestamp().to_string()));
+    }
+
+    #[tokio::test]
+    async fn done_stops_a_started_task() {
+        let dir = TempDir::new().unwrap();
+        let uuids = seed(dir.path(), &[("started", None, None)]).await;
+        let mut store = Store::open(dir.path()).await.unwrap();
+        let mut ops = Vec::new();
+        let mut task = store.replica.get_task(uuids[0]).await.unwrap().unwrap();
+        task.start(&mut ops).unwrap();
+        store.replica.commit_operations(ops).await.unwrap();
+
+        store.done(uuids[0]).await.unwrap();
+
+        assert_eq!(task_value(&mut store, uuids[0], "start").await, None);
+        assert_eq!(task_value(&mut store, uuids[0], "status").await.as_deref(), Some("completed"));
+    }
+
+    #[tokio::test]
+    async fn done_marks_the_recurring_template_mask() {
+        let dir = TempDir::new().unwrap();
+        let uuids = seed(dir.path(), &[("template", None, None), ("instance", None, None)]).await;
+        let (template, instance) = (uuids[0], uuids[1]);
+        let mut store = Store::open(dir.path()).await.unwrap();
+        let mut ops = Vec::new();
+        let mut task = store.replica.get_task(template).await.unwrap().unwrap();
+        task.set_status(Status::Recurring, &mut ops).unwrap();
+        task.set_value("mask", Some("---".into()), &mut ops).unwrap();
+        let mut task = store.replica.get_task(instance).await.unwrap().unwrap();
+        task.set_value("parent", Some(template.to_string()), &mut ops).unwrap();
+        task.set_value("imask", Some("1".into()), &mut ops).unwrap();
+        store.replica.commit_operations(ops).await.unwrap();
+
+        store.done(instance).await.unwrap();
+
+        assert_eq!(task_value(&mut store, template, "mask").await.as_deref(), Some("-+-"));
     }
 }

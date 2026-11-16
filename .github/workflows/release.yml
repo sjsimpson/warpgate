@@ -27,7 +27,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: crates/warpgate-tray
-          tauriScript: npx --yes @tauri-apps/cli@2
+          tauriScript: npx --yes @tauri-apps/cli@2.12.5
           tagName: ${{ github.ref_name }}
           releaseName: warpgate ${{ github.ref_name }}
           releaseBody: Tray app builds for macOS (Apple silicon), Linux, and Windows.
